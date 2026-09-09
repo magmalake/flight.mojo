@@ -1,0 +1,6 @@
+name = "flight-mojo"
+version = "0.1.0"
+description = "Apache Arrow Flight for Mojo: an Arrow IPC writer (schema + record batches, flatbuffers by hand) and a Flight server on flare's gRPC. Verified against stock pyarrow: GetFlightInfo, GetSchema and DoGet all round-trip."
+tags = ["arrow", "flight", "grpc", "ipc", "flatbuffers", "rpc", "magmalake"]
+# other tins this one depends on; omit if none
+tins = ["flare_mlake"]

@@ -1,0 +1,37 @@
+[workspace]
+authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
+channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
+name = "flight.mojo"
+version = "0.1.0"
+description = "Apache Arrow Flight for Mojo — an IPC writer and a Flight server over flare's gRPC"
+preview = ["pixi-build"]
+platforms = ["osx-arm64", "linux-64"]
+
+[dependencies]
+mojo = ">=1.0.0,<1.2.0"
+# flare supplies HTTP/2, gRPC framing and the server; see tins = ["flare_mlake"]
+# in shelf.toml. Consumed by source path during development
+# (`-I ../flare_mlake`), the same way the other magmalake tins are.
+
+[tasks]
+# The cross-language gates. Both verifiers are pyarrow rather than a reader we
+# also wrote: a writer checked only against our own reader would prove the two
+# agree and nothing about whether either matches Arrow.
+emit = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake tools/emit_stream.mojo -o build/emit && cd . && ./build/emit" }
+verify-ipc = { cmd = "python tools/verify_ipc.py", depends-on = ["emit"] }
+
+serve = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake tools/serve_demo.mojo -o build/serve" }
+verify-flight = { cmd = "bash tools/verify_flight.sh", depends-on = ["serve"] }
+
+fmt = { cmd = "mojo format src tools" }
+
+[feature.verify.dependencies]
+# pyarrow's conda build splits Flight into libarrow-flight; without it
+# `import pyarrow.flight` raises ImportError at the dlopen.
+python = "3.12.*"
+pyarrow = ">=21"
+libarrow-flight = ">=21"
+
+[environments]
+default = { solve-group = "default" }
+verify = { features = ["verify"], solve-group = "default" }

@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+// A trimmed Arrow Flight, wire-compatible with the real service.
+//
+// Enums are written as int32 and google.protobuf.Timestamp is omitted:
+// proto3 encodes an enum as a varint int32, so a client generated from the
+// official flight.proto and a server generated from this one agree on the
+// bytes. This exists because flare's proto_gen supports scalars, nested
+// messages and services, but not enums, maps or oneof.
+package arrow.flight.protocol;
+
+message HandshakeRequest {
+  uint64 protocol_version = 1;
+  bytes payload = 2;
+}
+
+message HandshakeResponse {
+  uint64 protocol_version = 1;
+  bytes payload = 2;
+}
+
+message FlightDescriptor {
+  // DescriptorType: 0 = UNKNOWN, 1 = PATH, 2 = CMD
+  int32 type = 1;
+  bytes cmd = 2;
+  repeated string path = 3;
+}
+
+message Location {
+  string uri = 1;
+}
+
+message Ticket {
+  bytes ticket = 1;
+}
+
+message FlightEndpoint {
+  Ticket ticket = 1;
+  repeated Location location = 2;
+}
+
+message FlightInfo {
+  // IPC-serialised Schema message (the flatbuffer, not a proto message).
+  bytes schema = 1;
+  FlightDescriptor flight_descriptor = 2;
+  repeated FlightEndpoint endpoint = 3;
+  int64 total_records = 4;
+  int64 total_bytes = 5;
+  bool ordered = 6;
+  bytes app_metadata = 7;
+}
+
+message Criteria {
+  bytes expression = 1;
+}
+
+// One frame of an Arrow IPC stream. data_header is the flatbuffer Message,
+// data_body the buffers it describes.
+message FlightData {
+  FlightDescriptor flight_descriptor = 1;
+  bytes data_header = 2;
+  bytes app_metadata = 3;
+  bytes data_body = 1000;
+}
+
+message SchemaResult {
+  bytes schema = 1;
+}
+
+service FlightService {
+  rpc Handshake(stream HandshakeRequest) returns (stream HandshakeResponse) {}
+  rpc ListFlights(Criteria) returns (stream FlightInfo) {}
+  rpc GetFlightInfo(FlightDescriptor) returns (FlightInfo) {}
+  rpc GetSchema(FlightDescriptor) returns (SchemaResult) {}
+  rpc DoGet(Ticket) returns (stream FlightData) {}
+}
