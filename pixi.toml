@@ -8,10 +8,34 @@ preview = ["pixi-build"]
 platforms = ["osx-arm64", "linux-64"]
 
 [dependencies]
-mojo = ">=1.0.0,<1.2.0"
+# Capped below 1.1.0 because flare is: its `Atomic[DType.…]` is the Mojo 1.0
+# spelling, and on a 1.1.0.dev nightly `Atomic` takes a type instead, so the
+# whole runtime fails to compile. This tracks flare's own pin and should move
+# when flare's does — not before.
+#
+# `<1.1.0a0`, not `<1.1.0`: conda sorts `1.1.0.dev2026090905` *below* `1.1.0`,
+# so the plain bound quietly admits every nightly it was meant to exclude.
+mojo = ">=1.0.0,<1.1.0a0"
 # flare supplies HTTP/2, gRPC framing and the server; see tins = ["flare_mlake"]
 # in shelf.toml. Consumed by source path during development
 # (`-I ../flare_mlake`), the same way the other magmalake tins are.
+#
+# Building flare from source means owning its native dependencies too: it
+# dlopens shims it builds itself (libflare_tls, libflare_zlib, libflare_brotli)
+# out of these. Taking the published tin instead would bring them along.
+openssl = ">=3.0,<4"
+ca-certificates = "*"
+zlib = ">=1.3.1,<2"
+libbrotlicommon = ">=1,<2"
+libbrotlidec = ">=1,<2"
+libbrotlienc = ">=1,<2"
+
+# flare ships its shim builds as activation scripts, so an environment that
+# has flare on its include path gets them built into $CONDA_PREFIX/lib the
+# same way flare's own does. Without this the server starts, serves the scan,
+# and then dies on the first dlopen.
+[activation]
+scripts = ["../flare_mlake/flare/tls/ffi/build.sh", "../flare_mlake/flare/http/ffi/build.sh"]
 
 [tasks]
 # The cross-language gates. Both verifiers are pyarrow rather than a reader we
@@ -20,8 +44,20 @@ mojo = ">=1.0.0,<1.2.0"
 emit = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake tools/emit_stream.mojo -o build/emit && cd . && ./build/emit" }
 verify-ipc = { cmd = "python tools/verify_ipc.py", depends-on = ["emit"] }
 
-serve = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake tools/serve_demo.mojo -o build/serve" }
+# `-I ../threads.mojo/...` is required by flare itself, not by this demo:
+# flare's threading is an adapter over threads.mojo, so anything compiling
+# flare from source needs it on the path.
+serve = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake -I ../threads.mojo/src -I ../threads.mojo/compat/stable tools/serve_demo.mojo -o build/serve" }
 verify-flight = { cmd = "bash tools/verify_flight.sh", depends-on = ["serve"] }
+
+# The Iceberg-backed server pulls in the whole read stack, which is why the
+# include list is long: iceberg needs avro and parquet, parquet needs arrow,
+# thrift and the four codecs, and everything needs threads.
+#
+# `-I ../threads.mojo/compat/stable` and not `compat/nightly`: flare pins
+# mojo <1.1.0, so this environment is 1.0.0, where `Atomic` takes a `DType`.
+serve-iceberg = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake -I ../iceberg.mojo/src -I ../parquet.mojo/src -I ../arrow-mlake.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../zstd.mojo/src -I ../snappy.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../hashes.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../threads.mojo/src -I ../threads.mojo/compat/stable tools/serve_iceberg.mojo -o build/serve_ice" }
+verify-iceberg = { cmd = "bash tools/verify_iceberg.sh", depends-on = ["serve-iceberg"] }
 
 fmt = { cmd = "mojo format src tools" }
 

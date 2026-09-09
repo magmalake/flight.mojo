@@ -11,31 +11,23 @@ well would force that on every consumer, including ones serving something else
 entirely. `FlightSource` is deliberately small — a schema, a row count, the
 batches — so the dependency belongs to whoever implements it.
 
-## This does not link yet
+## Linking flare and the Iceberg stack
 
-flare and `threads.mojo` both bind `pthread_create` through `external_call`,
-with signatures that are ABI-identical but spelled differently:
+This needed a fix elsewhere. flare and `threads.mojo` each bound
+`pthread_create` (and `pthread_join`, `pthread_self`,
+`pthread_setaffinity_np`) with ABI-identical but differently spelled
+signatures — `UnsafePointer` against `Pointer`, the same machine pointer
+behind different wrappers — and Mojo declares an extern *per signature*, so a
+binary needing both refused to lower. Iceberg's scan parallelism is
+`threads.mojo` and the server is flare, so this file could not be built at
+all.
 
-    flare    UnsafePointer[UInt64, MutUntrackedOrigin], _OpaquePtr (attr), ...
-    threads  Pointer[UInt64, MutUntrackedOrigin],       Int        (attr), ...
+flare's threading is now an adapter over `threads.mojo`, which owns the
+bindings, so there is one declaration per symbol and the two link cleanly.
 
-where `_OpaquePtr = UnsafePointer[UInt8, …]` and `OpaquePtr = Pointer[UInt8, …]`
-— the same machine pointer behind different wrappers. Mojo declares the extern
-per signature, so linking both into one binary fails:
-
-    error: existing function with conflicting signature
-    error: failed to legalize operation 'pop.external_call' … "pthread_create"
-
-Iceberg needs `threads.mojo` for its scan parallelism and the server needs
-flare, so this demo cannot build until the two agree. Aligning either side is
-a real change — about 30 uses across six files in flare, 39 across eight in
-`threads.mojo`, which is published and consumed by iceberg — and the start
-routine's *function pointer* type has to move with it.
-
-The code below is otherwise complete and is kept so the work is not lost.
-Everything it depends on is verified: the IPC writer round-trips through
-pyarrow, and the Flight server serves a fixed source to a stock
-`pyarrow.flight` client.
+Run:
+    pixi run serve-iceberg <table-dir>
+    pixi run -e verify verify-iceberg <table-dir>
 """
 
 from std.sys import argv
