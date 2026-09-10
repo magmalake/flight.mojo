@@ -7,6 +7,20 @@
 set -euo pipefail
 
 TABLE="${1:-../iceberg.mojo/tests/fixtures/ident_part}"
+
+# The fixture records absolute paths and its metadata says where it expects to
+# live; see tools/fixture_location.py. Put it there rather than rewriting the
+# prefix, which would mean editing the Avro manifests too.
+#
+# On the machine that generated the fixture this is a no-op, which is exactly
+# why it went unnoticed until CI: the paths resolved there and nowhere else.
+DEST="$(python tools/fixture_location.py "$TABLE")"
+if [ ! -d "$DEST" ]; then
+  echo "staging fixture at its recorded location: $DEST"
+  mkdir -p "$DEST"
+  cp -R "$TABLE"/. "$DEST"/
+fi
+TABLE="$DEST"
 : "${CONDA_PREFIX:?run this through pixi so the FFI shims resolve}"
 
 ./build/serve_ice "$TABLE" > build/iceberg-server.log 2>&1 &
