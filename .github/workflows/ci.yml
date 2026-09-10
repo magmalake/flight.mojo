@@ -122,8 +122,9 @@ jobs:
           run-install: false
           manifest-path: flight.mojo/pixi.toml
 
-      # The fixture lives in iceberg.mojo, so the path is relative to this
-      # repo the same way the sibling include paths are.
+      # The table is written by PyIceberg into build/ at run time rather than
+      # read from iceberg.mojo's fixtures: those record absolute paths and
+      # resolve only on the machine that made them.
       - name: pyarrow.flight reads an Iceberg table
         working-directory: flight.mojo
         run: pixi run -e verify verify-iceberg

@@ -6,21 +6,12 @@
 # zlib shim surfaces as a torn-down connection rather than a clear error.
 set -euo pipefail
 
-TABLE="${1:-../iceberg.mojo/tests/fixtures/ident_part}"
-
-# The fixture records absolute paths and its metadata says where it expects to
-# live; see tools/fixture_location.py. Put it there rather than rewriting the
-# prefix, which would mean editing the Avro manifests too.
-#
-# On the machine that generated the fixture this is a no-op, which is exactly
-# why it went unnoticed until CI: the paths resolved there and nowhere else.
-DEST="$(python tools/fixture_location.py "$TABLE")"
-if [ ! -d "$DEST" ]; then
-  echo "staging fixture at its recorded location: $DEST"
-  mkdir -p "$DEST"
-  cp -R "$TABLE"/. "$DEST"/
-fi
-TABLE="$DEST"
+# The table is generated rather than checked in: Iceberg metadata records
+# absolute paths, so a checked-in fixture resolves only on the machine that
+# made it. See tools/make_fixture.py -- it is also written by PyIceberg, which
+# makes this a cross-implementation read rather than us checking our own work.
+WAREHOUSE="$PWD/build/warehouse"
+TABLE="$(python tools/make_fixture.py "$WAREHOUSE" | tail -1)"
 : "${CONDA_PREFIX:?run this through pixi so the FFI shims resolve}"
 
 ./build/serve_ice "$TABLE" > build/iceberg-server.log 2>&1 &

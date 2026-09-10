@@ -67,6 +67,10 @@ fmt = { cmd = "mojo format src tools" }
 python = "3.12.*"
 pyarrow = ">=21"
 libarrow-flight = ">=21"
+# Writes the table the iceberg gate reads, so the Flight server is checked
+# against one the reference implementation produced.
+pyiceberg = ">=0.9"
+sqlalchemy = ">=2"
 
 [environments]
 default = { solve-group = "default" }
