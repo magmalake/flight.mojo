@@ -11,10 +11,10 @@ from flight.writer import Column, write_stream
 
 def main() raises:
     var fields = List[FieldSpec]()
-    fields.append(FieldSpec("id", DT_INT64, False))
-    fields.append(FieldSpec("amount", DT_FLOAT64, False))
-    fields.append(FieldSpec("flag", DT_BOOL, False))
-    fields.append(FieldSpec("name", DT_UTF8, False))
+    fields.append(FieldSpec.simple("id", DT_INT64, False))
+    fields.append(FieldSpec.simple("amount", DT_FLOAT64, False))
+    fields.append(FieldSpec.simple("flag", DT_BOOL, False))
+    fields.append(FieldSpec.simple("name", DT_UTF8, False))
 
     var ids = List[Int64]()
     var amounts = List[Float64]()

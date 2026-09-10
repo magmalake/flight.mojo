@@ -12,6 +12,7 @@ Arrow fixes how many buffers each type contributes, and the order:
 | type      | buffers                                  |
 |-----------|------------------------------------------|
 | int64     | validity, values (8 bytes each)          |
+| timestamp | validity, values (8 bytes each)          |
 | float64   | validity, values (8 bytes each)          |
 | bool      | validity, values (1 *bit* each)          |
 | utf8      | validity, offsets (int32), data          |
@@ -28,6 +29,7 @@ from std.memory import bitcast
 from .ipc import (
     BufferSpec,
     DT_BOOL,
+    DT_TIMESTAMP,
     DT_FLOAT64,
     DT_INT64,
     DT_UTF8,
@@ -77,13 +79,21 @@ struct Column(Copyable, Movable):
         return c^
 
     @staticmethod
+    def timestamp(var values: List[Int64]) -> Column:
+        """Epoch offsets. The unit and zone are the schema's business, not
+        the values' — see `FieldSpec.unit` / `FieldSpec.tz`."""
+        var c = Column(DT_TIMESTAMP)
+        c.i64 = values^
+        return c^
+
+    @staticmethod
     def utf8(var values: List[String]) -> Column:
         var c = Column(DT_UTF8)
         c.s = values^
         return c^
 
     def length(self) raises -> Int:
-        if self.dtype == DT_INT64:
+        if self.dtype == DT_INT64 or self.dtype == DT_TIMESTAMP:
             return len(self.i64)
         elif self.dtype == DT_FLOAT64:
             return len(self.f64)
@@ -171,7 +181,9 @@ def encode_batch(
         _push_bitmap(body, col.valid, rows)
         specs.append(BufferSpec(start, len(body) - start))
 
-        if col.dtype == DT_INT64:
+        if col.dtype == DT_INT64 or col.dtype == DT_TIMESTAMP:
+            # A timestamp is an int64 on the wire; only the schema knows it
+            # means a moment rather than a number.
             start = len(body)
             for i in range(rows):
                 _push_i64(body, col.i64[i])

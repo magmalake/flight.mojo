@@ -17,10 +17,10 @@ struct DemoSource(Copyable, FlightSource, Movable):
 
     def fields(self) raises -> List[FieldSpec]:
         var f = List[FieldSpec]()
-        f.append(FieldSpec("id", DT_INT64, False))
-        f.append(FieldSpec("amount", DT_FLOAT64, False))
-        f.append(FieldSpec("flag", DT_BOOL, False))
-        f.append(FieldSpec("name", DT_UTF8, False))
+        f.append(FieldSpec.simple("id", DT_INT64, False))
+        f.append(FieldSpec.simple("amount", DT_FLOAT64, False))
+        f.append(FieldSpec.simple("flag", DT_BOOL, False))
+        f.append(FieldSpec.simple("name", DT_UTF8, False))
         return f^
 
     def total_records(self) raises -> Int:

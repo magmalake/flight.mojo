@@ -36,9 +36,14 @@ between processes. Flight needs the second and cannot use the first.
 | `src/flight/server.mojo` | The Flight service over flare's gRPC. |
 | `src/flight/flight_pb.mojo` | Generated from `proto/flight.proto`; do not edit. |
 
-Supported types are `int64`, `float64`, `bool` and `utf8`. Dictionaries, nested
-types and compression are not implemented, and a batch using them is rejected
-rather than half-written.
+Supported types are `int64`, `float64`, `bool`, `utf8` and `timestamp`.
+Dictionaries, nested types and compression are not implemented, and a batch
+using them is rejected rather than half-written.
+
+A timestamp is an `int64` on the wire; only the schema knows it means a moment,
+which is why `FieldSpec` carries `unit` and `tz` and the other types ignore
+them. arrow-mlake's `TU_*` are Arrow's own `TimeUnit` values, so a unit read
+off a scanned column passes through untranslated.
 
 ## The proto is trimmed, not different
 
@@ -70,14 +75,23 @@ verify-flight` sets it.
 ## Running the gates
 
 ```sh
-pixi run -e verify verify-ipc      # pyarrow reads an IPC stream we wrote
-pixi run -e verify verify-flight   # pyarrow.flight drives the server
+pixi run -e verify verify-ipc       # pyarrow reads an IPC stream we wrote
+pixi run -e verify verify-flight    # pyarrow.flight drives the in-memory server
+pixi run -e verify verify-iceberg   # pyarrow.flight reads a real Iceberg table
 ```
+
+`verify-iceberg` compares rows **keyed by id**, not by position: neither
+Iceberg nor Flight promises an order, and pinning the one a run happens to
+produce would fail the first time scan planning changed without anything being
+wrong. Its expected values were confirmed by reading the fixture's Parquet
+directly rather than transcribed from this server's output, which would only
+prove it agrees with itself.
 
 ## Status
 
-Early. `GetFlightInfo`, `GetSchema` and `DoGet` work against a real client with
-a fixed in-memory source. `Handshake` and `ListFlights` answer UNIMPLEMENTED,
+Early, but real. `GetFlightInfo`, `GetSchema` and `DoGet` work against a stock
+client, over both a fixed in-memory source and a live Iceberg table — nulls and
+timestamps intact. `Handshake` and `ListFlights` answer UNIMPLEMENTED,
 which is a legal response a client tolerates. The `FlightSource` trait is the
 seam an Iceberg scan plugs into — deliberately small: a schema, a row count and
 the batches.

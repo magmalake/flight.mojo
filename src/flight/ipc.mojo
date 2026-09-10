@@ -21,8 +21,8 @@ in place, so every buffer must land on an 8-byte boundary.
 
 ## What is supported
 
-`int64`, `float64`, `bool` and `utf8` — the types `arrow-mlake`'s `RecordBatch`
-carries. Each column is written as the two or three buffers Arrow specifies:
+`int64`, `float64`, `bool`, `utf8` and `timestamp` — the types
+`arrow-mlake`'s `RecordBatch` carries. Each column is written as the two or three buffers Arrow specifies:
 a validity bitmap, then values, plus offsets for `utf8`. Nulls are always
 given a bitmap even when the column has none, because the alternative — a
 length-zero buffer — is legal but has caught readers out.
@@ -47,6 +47,7 @@ comptime TYPE_INT: UInt8 = 2
 comptime TYPE_FLOATING_POINT: UInt8 = 3
 comptime TYPE_UTF8: UInt8 = 5
 comptime TYPE_BOOL: UInt8 = 6
+comptime TYPE_TIMESTAMP: UInt8 = 10
 
 # org.apache.arrow.flatbuf.Precision
 comptime PRECISION_DOUBLE: Int = 2
@@ -58,15 +59,48 @@ comptime DT_INT64: Int = 0
 comptime DT_FLOAT64: Int = 1
 comptime DT_BOOL: Int = 2
 comptime DT_UTF8: Int = 3
+comptime DT_TIMESTAMP: Int = 4
+"""Microsecond-or-whatever-unit epoch offsets, stored exactly like `int64`.
+
+The unit and timezone live in the *schema*, not the values, which is why this
+needs a `FieldSpec` that carries them while the other types do not.
+"""
+
+# Arrow TimeUnit, and identical to arrow-mlake's TU_* — so a unit read off a
+# scanned column passes straight through without translation.
+comptime TU_SECOND: Int = 0
+comptime TU_MILLI: Int = 1
+comptime TU_MICRO: Int = 2
+comptime TU_NANO: Int = 3
 
 
 @fieldwise_init
 struct FieldSpec(Copyable, ImplicitlyCopyable, Movable):
-    """One column's name, type and nullability, as the schema will state it."""
+    """One column's name, type and nullability, as the schema will state it.
+
+    `unit` and `tz` are only read for `DT_TIMESTAMP`; every other type ignores
+    them. They are fields rather than a separate timestamp-only spec because a
+    schema is a list of columns, and a list wants one element type.
+    """
 
     var name: String
     var dtype: Int
     var nullable: Bool
+    var unit: Int
+    """Arrow `TimeUnit`, read only for `DT_TIMESTAMP`."""
+    var tz: String
+    """IANA zone name, or empty for a timestamp without one. Iceberg's
+    `timestamptz` is UTC and its `timestamp` has no zone; the difference is
+    carried here rather than by shifting the values."""
+
+    @staticmethod
+    def simple(name: String, dtype: Int, nullable: Bool) -> FieldSpec:
+        """A column whose type needs no unit or timezone.
+
+        Everything except `DT_TIMESTAMP`. The unit is filled with microseconds
+        so the field is never uninitialised, and is ignored for these types.
+        """
+        return FieldSpec(name, dtype, nullable, TU_MICRO, String(""))
 
 
 def _pad8(n: Int) -> Int:
@@ -93,8 +127,23 @@ def _pad_to8(mut out: List[UInt8]):
 # ── schema ───────────────────────────────────────────────────────────────
 
 
-def _build_type(mut b: FlatBufferBuilder, dtype: Int) raises -> Int:
+def _build_type(
+    mut b: FlatBufferBuilder, dtype: Int, unit: Int, tz: String
+) raises -> Int:
     """Write the type table for one column and return its offset."""
+    if dtype == DT_TIMESTAMP:
+        # Timestamp { unit: TimeUnit, timezone: string }. The string has to be
+        # written before the table that points at it — offsets only ever point
+        # backwards — and an empty zone is left absent rather than written as
+        # "", because absent is how Arrow spells "no timezone" and an empty
+        # string would be a zone whose name happens to be blank.
+        var tz_off = 0
+        if len(tz.as_bytes()) > 0:
+            tz_off = b.create_string(tz)
+        b.start_table(2)
+        b.add_i16(0, unit, TU_SECOND)
+        b.add_offset(1, tz_off)
+        return b.end_table()
     if dtype == DT_INT64:
         b.start_table(2)  # Int { bitWidth, is_signed }
         b.add_i32(0, 64)
@@ -122,6 +171,8 @@ def _type_tag(dtype: Int) raises -> UInt8:
         return TYPE_UTF8
     elif dtype == DT_BOOL:
         return TYPE_BOOL
+    elif dtype == DT_TIMESTAMP:
+        return TYPE_TIMESTAMP
     raise Error("ipc: unsupported dtype " + String(dtype))
 
 
@@ -135,7 +186,7 @@ def build_schema_message(fields: List[FieldSpec]) raises -> List[UInt8]:
     for i in range(len(fields)):
         var f = fields[i]
         var name_off = b.create_string(f.name)
-        var type_off = _build_type(b, f.dtype)
+        var type_off = _build_type(b, f.dtype, f.unit, f.tz)
         # Field { name, nullable, type_type, type, dictionary, children, ... }
         b.start_table(7)
         b.add_offset(0, name_off)

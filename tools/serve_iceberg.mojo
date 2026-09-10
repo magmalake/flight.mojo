@@ -36,6 +36,7 @@ from arrow_mlake.arrow import (
     AT_BOOL,
     AT_FLOAT64,
     AT_INT64,
+    AT_TIMESTAMP,
     AT_UTF8,
     ArrayData,
     bit_get,
@@ -52,7 +53,14 @@ from iceberg.read import ScanOptions
 from iceberg.scan import TableScan
 from parquet.reader import RecordBatch
 
-from flight.ipc import DT_BOOL, DT_FLOAT64, DT_INT64, DT_UTF8, FieldSpec
+from flight.ipc import (
+    DT_BOOL,
+    DT_FLOAT64,
+    DT_INT64,
+    DT_TIMESTAMP,
+    DT_UTF8,
+    FieldSpec,
+)
 from flight.server import FlightServer, FlightSource
 from flight.writer import Column
 
@@ -72,6 +80,7 @@ def _wanted() -> List[String]:
     c.append(String("region"))
     c.append(String("amount"))
     c.append(String("ok"))
+    c.append(String("ts"))
     return c^
 
 
@@ -84,6 +93,8 @@ def _dtype_of(a: ArrayData) raises -> Int:
         return DT_BOOL
     elif a.type.id == AT_UTF8:
         return DT_UTF8
+    elif a.type.id == AT_TIMESTAMP:
+        return DT_TIMESTAMP
     raise Error(
         String("flight: column '")
         + a.name
@@ -104,12 +115,12 @@ def _to_column(a: ArrayData) raises -> Column:
     var dt = _dtype_of(a)
     var col: Column
 
-    if dt == DT_INT64:
+    if dt == DT_INT64 or dt == DT_TIMESTAMP:
         var v = List[Int64]()
         var buf = Span(a.values)
         for i in range(a.length):
             v.append(load_i64(buf, i))
-        col = Column.int64(v^)
+        col = Column.int64(v^) if dt == DT_INT64 else Column.timestamp(v^)
     elif dt == DT_FLOAT64:
         var v = List[Float64]()
         var buf = Span(a.values)
@@ -170,7 +181,13 @@ struct IcebergSource(Copyable, FlightSource, Movable):
         ref b = batches[0]
         for i in range(len(b.roots)):
             ref a = b.arena.nodes[b.roots[i]]
-            out.append(FieldSpec(a.name, _dtype_of(a), a.nullable))
+            # unit and tz ride along from the scanned column: arrow-mlake's
+            # TU_* are Arrow's TimeUnit values, so nothing is translated.
+            out.append(
+                FieldSpec(
+                    a.name, _dtype_of(a), a.nullable, a.type.unit, a.type.tz
+                )
+            )
         return out^
 
     def total_records(self) raises -> Int:
