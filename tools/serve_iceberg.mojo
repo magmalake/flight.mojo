@@ -69,6 +69,38 @@ def _read_text(path: String) raises -> String:
         return f.read()
 
 
+def _open(table_dir: String) raises -> TableScan:
+    """A scan over the table's current metadata, with the columns projected.
+
+    Unpinned: callers either pin a snapshot or are asking which one is
+    current.
+    """
+    var io = FileIO.local()
+    var meta_path = find_latest_metadata(io, table_dir)
+    var metadata = TableMetadata.parse(_read_text(meta_path))
+    return TableScan(metadata^, io^).select(_wanted())
+
+
+def _encode_ticket(snapshot_id: Int64, path: String) -> String:
+    """A ticket names a snapshot *and* a file, not just a file.
+
+    Flight treats tickets as opaque bytes, so the format is ours. A worker
+    that decodes one knows which snapshot to plan at, which is what stops two
+    workers reading two different tables.
+    """
+    return String(snapshot_id) + String("|") + path
+
+
+def _decode_ticket(ticket: String) raises -> Tuple[Int64, String]:
+    var bytes = ticket.as_bytes()
+    for i in range(len(bytes)):
+        if bytes[i] == UInt8(124):  # "|"
+            var head = String(unsafe_from_utf8=bytes[:i])
+            var tail = String(unsafe_from_utf8=bytes[i + 1 :])
+            return (Int64(atol(head)), tail^)
+    raise Error("flight: malformed ticket, expected '<snapshot>|<path>'")
+
+
 def _wanted() -> List[String]:
     """The fixture columns whose Arrow types this IPC writer covers.
 
@@ -159,18 +191,30 @@ def _to_column(a: ArrayData) raises -> Column:
 
 
 struct IcebergSource(Copyable, FlightSource, Movable):
-    """A `FlightSource` backed by an Iceberg table scan."""
+    """A `FlightSource` backed by an Iceberg table scan, pinned to a snapshot.
+
+    **The snapshot is resolved once, at construction, and every scan uses it.**
+    Without that, `GetFlightInfo` and a later `DoGet` plan independently, so a
+    commit landing between them means a client fetching endpoints in parallel
+    can assemble a table that never existed at any single point in time. Data
+    files are immutable, so the symptom is not corruption — it is a mix of two
+    snapshots, which is worse for being plausible.
+
+    Pinning is what makes the invariant hold across *time* as well as across
+    workers: the union of the endpoints is the table as of one snapshot.
+    Iceberg's isolation does the work; this only has to ask for it.
+    """
 
     var table_dir: String
+    var snapshot_id: Int64
+    """The snapshot every scan from this source reads. Chosen once."""
 
-    def __init__(out self, var table_dir: String):
+    def __init__(out self, var table_dir: String) raises:
         self.table_dir = table_dir^
+        self.snapshot_id = _open(self.table_dir).snapshot().snapshot_id
 
     def _scan(self) raises -> TableScan:
-        var io = FileIO.local()
-        var meta_path = find_latest_metadata(io, self.table_dir)
-        var metadata = TableMetadata.parse(_read_text(meta_path))
-        return TableScan(metadata^, io^).select(_wanted())
+        return _open(self.table_dir).use_snapshot(self.snapshot_id)
 
     def tickets(self) raises -> List[String]:
         """One ticket per data file, straight off the scan plan.
@@ -182,7 +226,7 @@ struct IcebergSource(Copyable, FlightSource, Movable):
         """
         var out = List[String]()
         for task in self._scan().plan_files():
-            out.append(task.data_file.file_path)
+            out.append(_encode_ticket(self.snapshot_id, task.data_file.file_path))
         return out^
 
     def fields(self) raises -> List[FieldSpec]:
@@ -218,10 +262,19 @@ struct IcebergSource(Copyable, FlightSource, Movable):
         the rows a whole-table scan would have returned for that file. That is
         what makes the union of tickets equal the whole.
         """
+        var decoded = _decode_ticket(ticket)
+        var snapshot = decoded[0]
         var paths = List[String]()
-        paths.append(ticket)
+        paths.append(decoded[1])
+
+        # Plan at the ticket's snapshot, not at whatever is current. A ticket
+        # issued before a commit still reads the table the client was told
+        # about; `to_batches_for_paths` returns nothing for a file that
+        # snapshot never had, rather than failing the query.
         var out = List[List[Column]]()
-        var batches = self._scan().to_batches_for_paths(paths^, ScanOptions())
+        var batches = _open(self.table_dir).use_snapshot(snapshot).to_batches_for_paths(
+            paths^, ScanOptions()
+        )
         for bi in range(len(batches)):
             ref b = batches[bi]
             var cols = List[Column]()
