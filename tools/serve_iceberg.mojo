@@ -81,24 +81,70 @@ def _open(table_dir: String) raises -> TableScan:
     return TableScan(metadata^, io^).select(_wanted())
 
 
-def _encode_ticket(snapshot_id: Int64, path: String) -> String:
-    """A ticket names a snapshot *and* a file, not just a file.
+comptime SPLIT_SIZE = 4 * 1024
+"""Target bytes per endpoint.
 
-    Flight treats tickets as opaque bytes, so the format is ours. A worker
-    that decodes one knows which snapshot to plan at, which is what stops two
-    workers reading two different tables.
+Without a split the unit of work is the data file, so one large file is one
+endpoint and one worker — the straggler that decides how long a fan-out takes.
+
+4 KiB is absurd for real data and is set that way on purpose: the gate's table
+is a few tens of kilobytes, and a production figure of 128 MiB would put every
+row group in one run, so the file would not divide and a broken splitter would
+pass unnoticed. Size this to the data, not to this number.
+"""
+
+
+def _encode_ticket(
+    snapshot_id: Int64, path: String, start: Int64, length: Int64
+) -> String:
+    """A ticket names a snapshot, a file, *and* a byte range within it.
+
+    Flight treats tickets as opaque bytes, so the format is ours. Carrying the
+    range is what lets one file become several endpoints: two workers can hold
+    tickets for the same path and still read disjoint row groups, because the
+    range is what `to_batches_for_ranges` narrows on.
+
+    Without it the ticket would name a whole file and splitting would be
+    invisible to clients — the planner would divide the work and then hand out
+    a unit that cannot express the division.
     """
-    return String(snapshot_id) + String("|") + path
+    return (
+        String(snapshot_id)
+        + String("|")
+        + String(start)
+        + String("|")
+        + String(length)
+        + String("|")
+        + path
+    )
 
 
-def _decode_ticket(ticket: String) raises -> Tuple[Int64, String]:
+def _decode_ticket(ticket: String) raises -> Tuple[Int64, Int64, Int64, String]:
+    """Split on the first three bars; the rest is the path.
+
+    Only the first three, because a file path may itself contain one.
+    """
     var bytes = ticket.as_bytes()
+    var cuts = List[Int]()
     for i in range(len(bytes)):
         if bytes[i] == UInt8(124):  # "|"
-            var head = String(unsafe_from_utf8=bytes[:i])
-            var tail = String(unsafe_from_utf8=bytes[i + 1 :])
-            return (Int64(atol(head)), tail^)
-    raise Error("flight: malformed ticket, expected '<snapshot>|<path>'")
+            cuts.append(i)
+            if len(cuts) == 3:
+                break
+    if len(cuts) < 3:
+        raise Error(
+            "flight: malformed ticket, expected"
+            " '<snapshot>|<start>|<length>|<path>'"
+        )
+    var snap = Int64(atol(String(unsafe_from_utf8=bytes[: cuts[0]])))
+    var start = Int64(
+        atol(String(unsafe_from_utf8=bytes[cuts[0] + 1 : cuts[1]]))
+    )
+    var length = Int64(
+        atol(String(unsafe_from_utf8=bytes[cuts[1] + 1 : cuts[2]]))
+    )
+    var path = String(unsafe_from_utf8=bytes[cuts[2] + 1 :])
+    return (snap, start, length, path^)
 
 
 def _wanted() -> List[String]:
@@ -214,7 +260,11 @@ struct IcebergSource(Copyable, FlightSource, Movable):
         self.snapshot_id = _open(self.table_dir).snapshot().snapshot_id
 
     def _scan(self) raises -> TableScan:
-        return _open(self.table_dir).use_snapshot(self.snapshot_id)
+        return (
+            _open(self.table_dir)
+            .use_snapshot(self.snapshot_id)
+            .with_split_size(SPLIT_SIZE)
+        )
 
     def tickets(self) raises -> List[String]:
         """One ticket per data file, straight off the scan plan.
@@ -226,7 +276,14 @@ struct IcebergSource(Copyable, FlightSource, Movable):
         """
         var out = List[String]()
         for task in self._scan().plan_files():
-            out.append(_encode_ticket(self.snapshot_id, task.data_file.file_path))
+            out.append(
+                _encode_ticket(
+                    self.snapshot_id,
+                    task.data_file.file_path,
+                    task.start,
+                    task.length,
+                )
+            )
         return out^
 
     def fields(self) raises -> List[FieldSpec]:
@@ -265,15 +322,20 @@ struct IcebergSource(Copyable, FlightSource, Movable):
         var decoded = _decode_ticket(ticket)
         var snapshot = decoded[0]
         var paths = List[String]()
-        paths.append(decoded[1])
+        var starts = List[Int64]()
+        starts.append(decoded[1])
+        paths.append(decoded[3])
 
         # Plan at the ticket's snapshot, not at whatever is current. A ticket
         # issued before a commit still reads the table the client was told
         # about; `to_batches_for_paths` returns nothing for a file that
         # snapshot never had, rather than failing the query.
         var out = List[List[Column]]()
-        var batches = _open(self.table_dir).use_snapshot(snapshot).to_batches_for_paths(
-            paths^, ScanOptions()
+        var batches = (
+            _open(self.table_dir)
+            .use_snapshot(snapshot)
+            .with_split_size(SPLIT_SIZE)
+            .to_batches_for_splits(paths^, starts^, ScanOptions())
         )
         for bi in range(len(batches)):
             ref b = batches[bi]

@@ -50,6 +50,9 @@ print(f"union: {table.num_rows} rows x {table.num_columns} cols")
 # The fixture, keyed by id. Confirmed by reading its Parquet files directly
 # with pyarrow — not transcribed from this server's own output, which would
 # only prove it agrees with itself.
+SPLIT_ROWS = 600
+"""Rows in the third data file, the one written with many small row groups."""
+
 expected = {
     1: ("eu", 1.5, True, datetime(2023, 11, 14, 0, 0)),
     2: ("us", None, False, datetime(2023, 11, 15, 0, 0)),
@@ -88,9 +91,24 @@ if len(ids) != len(set(ids)):
     print(f"MISMATCH: ids returned by more than one endpoint: {dupes}")
     ok = False
 
+# Splitting has to show up as *more endpoints than data files*, or the planner
+# divided the work and then handed out a unit that cannot express the division.
+# Three files here, one of which has many row groups.
+if len(info.endpoints) <= 3:
+    print(f"MISMATCH: expected splitting to add endpoints beyond the 3 data files, got {len(info.endpoints)}")
+    ok = False
+
 if table.num_rows != info.total_records:
     print(f"MISMATCH: GetFlightInfo said {info.total_records}, DoGet gave {table.num_rows}")
     ok = False
+
+# The wide file's rows are checked in bulk rather than one by one.
+wide = [k for k in rows if rows[k][0] == "split"]
+if len(wide) != SPLIT_ROWS:
+    print(f"MISMATCH: expected {SPLIT_ROWS} split-file rows, got {len(wide)}")
+    ok = False
+for k in wide:
+    del rows[k]
 
 if set(rows) != set(expected):
     print(f"MISMATCH ids: expected {sorted(expected)}, got {sorted(rows)}")

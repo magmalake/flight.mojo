@@ -21,6 +21,7 @@ import sys
 from datetime import datetime
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 from pyiceberg.catalog.sql import SqlCatalog
 
 warehouse = sys.argv[1]
@@ -83,6 +84,28 @@ table = catalog.create_table(
 # has a real split to advertise. One file would let a broken partition pass.
 table.append(table_data.slice(0, 4))
 table.append(table_data.slice(4, 3))
+
+# A third file, written directly with many small row groups and registered via
+# add_files. PyIceberg ignores row-group-size properties on its own writes, and
+# without several row groups inside one file there is nothing for split
+# planning to divide: the endpoint count would equal the file count and a
+# broken splitter would pass unnoticed.
+#
+# add_files records split_offsets from the footer, which is exactly what the
+# planner needs to divide the file without opening it.
+wide = pa.table(
+    {
+        "id": list(range(100, 700)),
+        "region": ["split"] * 600,
+        "amount": [1.0] * 600,
+        "ok": [True] * 600,
+        "ts": [datetime(2024, 2, 1)] * 600,
+    },
+    schema=schema,
+)
+external = os.path.join(warehouse, "external.parquet")
+pq.write_table(wide, external, row_group_size=25, compression="none")
+table.add_files([external])
 
 # Print the table directory, not the metadata file: the caller wants somewhere
 # to point a scan at, and deriving it here keeps the layout PyIceberg chose
