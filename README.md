@@ -87,11 +87,32 @@ wrong. Its expected values were confirmed by reading the fixture's Parquet
 directly rather than transcribed from this server's output, which would only
 prove it agrees with itself.
 
+## Tickets are the unit of work
+
+`GetFlightInfo` advertises **one endpoint per Iceberg data file**, and a ticket
+names the file to read. That split is not invented here: Iceberg's planner has
+already decided where the seams are — pruning partitions, attaching delete
+files, computing a residual per task — so the endpoints are its plan, handed
+out.
+
+The invariant a client depends on is that the union of every ticket is the
+whole table, with nothing repeated and nothing lost. That is what entitles a
+client to fetch endpoints in parallel and concatenate, and `verify-iceberg`
+asserts it rather than assuming it: 6 endpoints over the fixture, row counts
+2+1+1+1+1+1, union of 7 rows with ids 1–7 and no duplicates.
+
+`total_records` comes from the manifests via `TableScan.count`, so an
+unfiltered table is counted without opening a data file.
+
+Endpoints carry no `Location`, which Flight defines as "fetch from the server
+you asked". That is right for one process; a distributed deployment fills them
+in, and nothing else about the shape changes.
+
 ## Status
 
 Early, but real. `GetFlightInfo`, `GetSchema` and `DoGet` work against a stock
-client, over both a fixed in-memory source and a live Iceberg table — nulls and
-timestamps intact. `Handshake` and `ListFlights` answer UNIMPLEMENTED,
-which is a legal response a client tolerates. The `FlightSource` trait is the
-seam an Iceberg scan plugs into — deliberately small: a schema, a row count and
-the batches.
+client, over both a fixed in-memory source and a live Iceberg table — nulls,
+timestamps and a per-file split intact. `Handshake` and `ListFlights` answer
+UNIMPLEMENTED, which is a legal response a client tolerates. `FlightSource` is
+the seam: a schema, a row count, the tickets, and the batches behind one
+ticket.

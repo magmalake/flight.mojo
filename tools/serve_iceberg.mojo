@@ -166,15 +166,27 @@ struct IcebergSource(Copyable, FlightSource, Movable):
     def __init__(out self, var table_dir: String):
         self.table_dir = table_dir^
 
-    def _scan(self) raises -> List[RecordBatch]:
+    def _scan(self) raises -> TableScan:
         var io = FileIO.local()
         var meta_path = find_latest_metadata(io, self.table_dir)
         var metadata = TableMetadata.parse(_read_text(meta_path))
-        var scan = TableScan(metadata^, io^).select(_wanted())
-        return scan.to_batches(ScanOptions())
+        return TableScan(metadata^, io^).select(_wanted())
+
+    def tickets(self) raises -> List[String]:
+        """One ticket per data file, straight off the scan plan.
+
+        Iceberg has already decided where the work divides — pruning
+        partitions, attaching delete files, computing a residual per task — so
+        the planner's own split is the right one to hand out rather than a
+        second opinion invented here.
+        """
+        var out = List[String]()
+        for task in self._scan().plan_files():
+            out.append(task.data_file.file_path)
+        return out^
 
     def fields(self) raises -> List[FieldSpec]:
-        var batches = self._scan()
+        var batches = self._scan().to_batches(ScanOptions())
         var out = List[FieldSpec]()
         if len(batches) == 0:
             return out^
@@ -191,15 +203,25 @@ struct IcebergSource(Copyable, FlightSource, Movable):
         return out^
 
     def total_records(self) raises -> Int:
-        var n = 0
-        var batches = self._scan()
-        for i in range(len(batches)):
-            n += batches[i].num_rows
-        return n
+        """Answered from the manifests where possible.
 
-    def batches(self) raises -> List[List[Column]]:
+        `count` adds up `record_count` for every task whose rows all survive,
+        so an unfiltered table is counted without opening a data file at all.
+        """
+        return Int(self._scan().count(ScanOptions()))
+
+    def batches(self, ticket: String) raises -> List[List[Column]]:
+        """The rows of the one data file this ticket names.
+
+        The plan still applies to it — partition pruning, the residual, and
+        any delete files attached to the task — so a worker returns exactly
+        the rows a whole-table scan would have returned for that file. That is
+        what makes the union of tickets equal the whole.
+        """
+        var paths = List[String]()
+        paths.append(ticket)
         var out = List[List[Column]]()
-        var batches = self._scan()
+        var batches = self._scan().to_batches_for_paths(paths^, ScanOptions())
         for bi in range(len(batches)):
             ref b = batches[bi]
             var cols = List[Column]()

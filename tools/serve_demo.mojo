@@ -26,7 +26,13 @@ struct DemoSource(Copyable, FlightSource, Movable):
     def total_records(self) raises -> Int:
         return 5
 
-    def batches(self) raises -> List[List[Column]]:
+    def tickets(self) raises -> List[String]:
+        """One ticket: a literal table has no seams to split on."""
+        var t = List[String]()
+        t.append(String("all"))
+        return t^
+
+    def batches(self, ticket: String) raises -> List[List[Column]]:
         var ids = List[Int64]()
         var amounts = List[Float64]()
         var flags = List[Bool]()

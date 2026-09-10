@@ -145,11 +145,17 @@ struct FlightServer[D: Copyable & Deinitable & Movable & FlightSource](
         info.schema = _encapsulated_schema(self.source.fields())
         info.flight_descriptor = desc^
 
-        var ticket = Ticket()
-        ticket.ticket = _to_list(String("default").as_bytes())
-        var ep = FlightEndpoint()
-        ep.ticket = ticket^
-        info.endpoint.append(ep^)
+        # One endpoint per ticket. No `Location` on any of them, which Flight
+        # defines as "fetch from the server you asked" — right for a single
+        # process, and it avoids inventing a hostname the client may not be
+        # able to reach. A distributed deployment fills these in.
+        var tickets = self.source.tickets()
+        for i in range(len(tickets)):
+            var ticket = Ticket()
+            ticket.ticket = _to_list(tickets[i].as_bytes())
+            var ep = FlightEndpoint()
+            ep.ticket = ticket^
+            info.endpoint.append(ep^)
 
         info.total_records = Int64(self.source.total_records())
         info.total_bytes = Int64(-1)  # Flight's "unknown"
@@ -177,6 +183,17 @@ struct FlightServer[D: Copyable & Deinitable & Movable & FlightSource](
         `frame_message` adds for a file stream is *not* used here, because
         gRPC already delimits messages.
         """
+        # The ticket names which unit of work to read. A stream always opens
+        # with the schema even when the ticket turns out to be empty: the
+        # client builds its reader from that message, so a stream that skipped
+        # it because there were no rows would fail rather than return nothing.
+        var req = Ticket()
+        try:
+            req = Ticket.decode(request_bytes)
+        except:
+            pass
+        var which = String(unsafe_from_utf8=Span(req.ticket))
+
         var fields = self.source.fields()
         var msgs = List[List[UInt8]]()
 
@@ -184,7 +201,7 @@ struct FlightServer[D: Copyable & Deinitable & Movable & FlightSource](
         schema_msg.data_header = build_schema_message(fields)
         msgs.append(schema_msg.encode())
 
-        var batches = self.source.batches()
+        var batches = self.source.batches(which)
         for i in range(len(batches)):
             var pair = encode_batch(fields, batches[i])
             var fd = FlightData()
@@ -198,9 +215,20 @@ struct FlightServer[D: Copyable & Deinitable & Movable & FlightSource](
 trait FlightSource(Movable):
     """What a Flight server needs from whatever is serving the data.
 
-    Deliberately small: a schema, a row count and the batches. An Iceberg
-    scan, a Parquet file or a literal in-memory table can all satisfy it, and
-    the server does not care which.
+    Deliberately small: a schema, a row count, a list of tickets and the
+    batches behind one ticket. An Iceberg scan, a Parquet file or a literal
+    in-memory table can all satisfy it, and the server does not care which.
+
+    **Tickets are the unit of work.** `GetFlightInfo` turns each into an
+    endpoint, and a client is free to fetch them independently and in
+    parallel — that is the whole point of Flight advertising more than one.
+    A source with nothing to split returns a single ticket; one backed by
+    Iceberg returns one per data file, because the scan planner has already
+    decided where the seams are.
+
+    The union of every ticket's batches must be the whole result, and no two
+    tickets may return the same row, or a client that fetches them all gets
+    the wrong answer.
     """
 
     def fields(self) raises -> List[FieldSpec]:
@@ -209,5 +237,10 @@ trait FlightSource(Movable):
     def total_records(self) raises -> Int:
         ...
 
-    def batches(self) raises -> List[List[Column]]:
+    def tickets(self) raises -> List[String]:
+        """One opaque ticket per unit of work, in no particular order."""
+        ...
+
+    def batches(self, ticket: String) raises -> List[List[Column]]:
+        """The batches behind one ticket from `tickets`."""
         ...
