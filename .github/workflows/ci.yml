@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Every gate here is pyarrow reading what this repo wrote. That is deliberate:
+# a writer checked only against a reader we also wrote proves the two agree and
+# nothing about whether either matches Arrow.
+jobs:
+  # The IPC writer alone — no flare, no server, no sibling checkouts. Kept
+  # separate because it is the piece with the least around it: if the
+  # flatbuffer encoding breaks, this fails on its own rather than inside a
+  # protocol failure three layers up.
+  ipc:
+    name: ipc / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          # Pinned to match every other magmalake repo (mojoshelf tins.toml).
+          pixi-version: v0.78.0
+          run-install: false
+
+      - name: pyarrow reads an IPC stream we wrote
+        run: pixi run -e verify verify-ipc
+
+  # The Flight server over a fixed in-memory source. Needs flare, and flare
+  # needs threads.mojo since its threading became an adapter over it.
+  flight:
+    name: flight / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: flight.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/flare_mlake
+          path: flare_mlake
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/threads.mojo
+          path: threads.mojo
+
+      - uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          pixi-version: v0.78.0
+          run-install: false
+          manifest-path: flight.mojo/pixi.toml
+
+      # flare builds its FFI shims from pixi activation scripts, so this is
+      # also what puts libflare_tls / libflare_zlib in $CONDA_PREFIX/lib. A
+      # missing zlib shim does not fail loudly: gRPC clients advertise gzip,
+      # flare picks it, the encode fails, and the connection is torn down
+      # after the response headers.
+      - name: pyarrow.flight drives the server
+        working-directory: flight.mojo
+        run: pixi run -e verify verify-flight
+
+  # The whole read stack: an Iceberg table served over Flight, one endpoint
+  # per data file. The sibling list is long because iceberg needs avro and
+  # parquet, parquet needs arrow, thrift and four codecs, and everything needs
+  # threads — see the serve-iceberg task for the matching include chain.
+  iceberg:
+    name: iceberg / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: flight.mojo
+
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/flare_mlake, path: flare_mlake }
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/threads.mojo, path: threads.mojo }
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/iceberg.mojo, path: iceberg.mojo }
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/parquet.mojo, path: parquet.mojo }
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/arrow-mlake.mojo, path: arrow-mlake.mojo }
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/avro.mojo, path: avro.mojo }
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/thrift.mojo, path: thrift.mojo }
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/zstd.mojo, path: zstd.mojo }
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/snappy.mojo, path: snappy.mojo }
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/lz4.mojo, path: lz4.mojo }
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/brotli.mojo, path: brotli.mojo }
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/hashes.mojo, path: hashes.mojo }
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/roaring.mojo, path: roaring.mojo }
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/objectstore.mojo, path: objectstore.mojo }
+
+      - uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          pixi-version: v0.78.0
+          run-install: false
+          manifest-path: flight.mojo/pixi.toml
+
+      # The fixture lives in iceberg.mojo, so the path is relative to this
+      # repo the same way the sibling include paths are.
+      - name: pyarrow.flight reads an Iceberg table
+        working-directory: flight.mojo
+        run: pixi run -e verify verify-iceberg
