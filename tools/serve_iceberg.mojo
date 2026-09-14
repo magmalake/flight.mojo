@@ -60,6 +60,7 @@ from arrow_mlake.arrow import (
 )
 from flare.grpc import GrpcStreamingService
 from flare.http import HttpServer
+from flare.http import ServerConfig
 from flare.net import SocketAddr
 from iceberg.catalog.filesystem import find_latest_metadata
 from iceberg.io import FileIO
@@ -427,7 +428,14 @@ def main() raises:
     if len(src.columns) > 0:
         print("  columns:", len(src.columns), "projected", flush=True)
 
-    var srv = HttpServer.bind(SocketAddr.localhost(port))
+    # A scan is not a web page. flare's defaults bound a request at
+    # write_timeout_ms = 5 s, which a fan-out of million-row splits exceeds
+    # while the client is still draining an earlier one, and the connection
+    # is reaped mid-response.
+    var cfg = ServerConfig()
+    cfg.write_timeout_ms = 120_000
+    cfg.idle_timeout_ms = 60_000
+    var srv = HttpServer.bind(SocketAddr.localhost(port), cfg^)
     if len(workers) == 0:
         print("flight worker on 127.0.0.1:", port, sep="", flush=True)
     else:
