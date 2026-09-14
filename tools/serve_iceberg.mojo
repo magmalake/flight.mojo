@@ -25,9 +25,24 @@ all.
 flare's threading is now an adapter over `threads.mojo`, which owns the
 bindings, so there is one declaration per symbol and the two link cleanly.
 
+## One binary, two roles
+
+The same server is a worker or a coordinator depending on whether it is given
+any `--worker` URIs. A worker serves `DoGet` for whatever ticket it is handed;
+a coordinator plans the scan and points its endpoints at the workers. Nothing
+about the code differs, because nothing about the *protocol* differs — which is
+the argument for doing it this way rather than building a scheduler.
+
 Run:
     pixi run serve-iceberg <table-dir>
     pixi run -e verify verify-iceberg <table-dir>
+
+    # a three-process fan-out: two workers and a coordinator in front of them
+    ./build/serve_ice <table-dir> --port 8816
+    ./build/serve_ice <table-dir> --port 8817
+    ./build/serve_ice <table-dir> --port 8815 \
+        --worker grpc+tcp://127.0.0.1:8816 \
+        --worker grpc+tcp://127.0.0.1:8817
 """
 
 from std.sys import argv
@@ -64,13 +79,18 @@ from flight.ipc import (
 from flight.server import FlightServer, FlightSource
 from flight.writer import Column
 
+
 def _read_text(path: String) raises -> String:
     with open(path, "r") as f:
         return f.read()
 
 
-def _open(table_dir: String) raises -> TableScan:
+def _open(table_dir: String, columns: List[String]) raises -> TableScan:
     """A scan over the table's current metadata, with the columns projected.
+
+    An empty `columns` selects everything, which is what a server told nothing
+    about a table should do. A table with a column this IPC writer cannot
+    encode — an `int32`, say — is then served by naming the ones it can.
 
     Unpinned: callers either pin a snapshot or are asking which one is
     current.
@@ -78,19 +98,22 @@ def _open(table_dir: String) raises -> TableScan:
     var io = FileIO.local()
     var meta_path = find_latest_metadata(io, table_dir)
     var metadata = TableMetadata.parse(_read_text(meta_path))
-    return TableScan(metadata^, io^).select(_wanted())
+    var scan = TableScan(metadata^, io^)
+    if len(columns) == 0:
+        return scan^
+    return scan.select(columns.copy())
 
 
-comptime SPLIT_SIZE = 4 * 1024
-"""Target bytes per endpoint.
+comptime DEFAULT_SPLIT_SIZE = 4 * 1024
+"""Target bytes per endpoint, unless `--split-size` says otherwise.
 
 Without a split the unit of work is the data file, so one large file is one
 endpoint and one worker — the straggler that decides how long a fan-out takes.
 
-4 KiB is absurd for real data and is set that way on purpose: the gate's table
+4 KiB is absurd for real data and is the default on purpose: the gate's table
 is a few tens of kilobytes, and a production figure of 128 MiB would put every
 row group in one run, so the file would not divide and a broken splitter would
-pass unnoticed. Size this to the data, not to this number.
+pass unnoticed. Real tables pass `--split-size`.
 """
 
 
@@ -145,21 +168,6 @@ def _decode_ticket(ticket: String) raises -> Tuple[Int64, Int64, Int64, String]:
     )
     var path = String(unsafe_from_utf8=bytes[cuts[2] + 1 :])
     return (snap, start, length, path^)
-
-
-def _wanted() -> List[String]:
-    """The fixture columns whose Arrow types this IPC writer covers.
-
-    `ts` is a timestamp and is left out rather than mis-encoded: the writer
-    rejects types it cannot lay out, and quietly coercing one would be worse.
-    """
-    var c = List[String]()
-    c.append(String("id"))
-    c.append(String("region"))
-    c.append(String("amount"))
-    c.append(String("ok"))
-    c.append(String("ts"))
-    return c^
 
 
 def _dtype_of(a: ArrayData) raises -> Int:
@@ -252,18 +260,32 @@ struct IcebergSource(Copyable, FlightSource, Movable):
     """
 
     var table_dir: String
+    var columns: List[String]
+    """What to project; empty means every column."""
+    var split_size: Int
+    """Target bytes per task. Planning and reading must agree on it, or a
+    ticket names a task the re-plan does not have."""
     var snapshot_id: Int64
     """The snapshot every scan from this source reads. Chosen once."""
 
-    def __init__(out self, var table_dir: String) raises:
+    def __init__(
+        out self,
+        var table_dir: String,
+        var columns: List[String],
+        split_size: Int = DEFAULT_SPLIT_SIZE,
+    ) raises:
         self.table_dir = table_dir^
-        self.snapshot_id = _open(self.table_dir).snapshot().snapshot_id
+        self.columns = columns^
+        self.split_size = split_size
+        self.snapshot_id = (
+            _open(self.table_dir, self.columns).snapshot().snapshot_id
+        )
 
     def _scan(self) raises -> TableScan:
         return (
-            _open(self.table_dir)
+            _open(self.table_dir, self.columns)
             .use_snapshot(self.snapshot_id)
-            .with_split_size(SPLIT_SIZE)
+            .with_split_size(self.split_size)
         )
 
     def tickets(self) raises -> List[String]:
@@ -332,9 +354,9 @@ struct IcebergSource(Copyable, FlightSource, Movable):
         # snapshot never had, rather than failing the query.
         var out = List[List[Column]]()
         var batches = (
-            _open(self.table_dir)
+            _open(self.table_dir, self.columns)
             .use_snapshot(snapshot)
-            .with_split_size(SPLIT_SIZE)
+            .with_split_size(self.split_size)
             .to_batches_for_splits(paths^, starts^, ScanOptions())
         )
         for bi in range(len(batches)):
@@ -346,17 +368,82 @@ struct IcebergSource(Copyable, FlightSource, Movable):
         return out^
 
 
+comptime USAGE = (
+    "usage: serve_iceberg <table-dir> [--port N] [--worker URI]..."
+    " [--columns a,b,c] [--split-size BYTES]"
+)
+
+
+def _split_commas(s: String) -> List[String]:
+    var out = List[String]()
+    var bytes = s.as_bytes()
+    var start = 0
+    for i in range(len(bytes)):
+        if bytes[i] == UInt8(44):  # ","
+            if i > start:
+                out.append(String(unsafe_from_utf8=bytes[start:i]))
+            start = i + 1
+    if len(bytes) > start:
+        out.append(String(unsafe_from_utf8=bytes[start:]))
+    return out^
+
+
 def main() raises:
     var args = argv()
     if len(args) < 2:
-        print("usage: serve_iceberg <table-dir>")
+        print(USAGE)
         return
-    var table_dir = String(args[1])
 
-    var src = IcebergSource(table_dir^)
+    var table_dir = String(args[1])
+    var port = UInt16(8815)
+    var workers = List[String]()
+    var columns = List[String]()
+    var split_size = DEFAULT_SPLIT_SIZE
+
+    var i = 2
+    while i < len(args):
+        var flag = String(args[i])
+        if i + 1 >= len(args):
+            print(USAGE)
+            return
+        if flag == String("--port"):
+            port = UInt16(atol(String(args[i + 1])))
+        elif flag == String("--split-size"):
+            split_size = atol(String(args[i + 1]))
+        elif flag == String("--columns"):
+            columns = _split_commas(String(args[i + 1]))
+        elif flag == String("--worker"):
+            # Repeated, not comma-separated: a URI is a thing a shell can
+            # quote wrongly once, and this way each one stands alone.
+            workers.append(String(args[i + 1]))
+        else:
+            print(USAGE)
+            return
+        i += 2
+
+    var src = IcebergSource(table_dir^, columns^, split_size)
     var n = src.total_records()
     print("serving", n, "rows from", src.table_dir, flush=True)
+    if len(src.columns) > 0:
+        print("  columns:", len(src.columns), "projected", flush=True)
 
-    var srv = HttpServer.bind(SocketAddr.localhost(8815))
-    print("flight server on 127.0.0.1:8815", flush=True)
-    srv.serve(GrpcStreamingService(FlightServer(src^)))
+    var srv = HttpServer.bind(SocketAddr.localhost(port))
+    if len(workers) == 0:
+        print("flight worker on 127.0.0.1:", port, sep="", flush=True)
+    else:
+        # Say it out loud in the log: a coordinator that hands out endpoints
+        # nobody can reach looks identical to a working one until the client
+        # tries to connect, and the URI it prints is the URI it advertises.
+        print(
+            "flight coordinator on 127.0.0.1:",
+            port,
+            ", endpoints over ",
+            len(workers),
+            " worker(s)",
+            sep="",
+            flush=True,
+        )
+        for w in workers:
+            print("  worker:", w, flush=True)
+
+    srv.serve(GrpcStreamingService(FlightServer(src^, workers^)))

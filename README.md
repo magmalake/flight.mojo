@@ -78,6 +78,7 @@ verify-flight` sets it.
 pixi run -e verify verify-ipc       # pyarrow reads an IPC stream we wrote
 pixi run -e verify verify-flight    # pyarrow.flight drives the in-memory server
 pixi run -e verify verify-iceberg   # pyarrow.flight reads a real Iceberg table
+pixi run -e verify verify-cluster   # ...from two worker processes behind a coordinator
 ```
 
 `verify-iceberg` compares rows **keyed by id**, not by position: neither
@@ -89,24 +90,54 @@ prove it agrees with itself.
 
 ## Tickets are the unit of work
 
-`GetFlightInfo` advertises **one endpoint per Iceberg data file**, and a ticket
-names the file to read. That split is not invented here: Iceberg's planner has
-already decided where the seams are — pruning partitions, attaching delete
-files, computing a residual per task — so the endpoints are its plan, handed
-out.
+`GetFlightInfo` advertises **one endpoint per Iceberg scan task**, and a ticket
+names the snapshot, the file and the byte range to read. That split is not
+invented here: Iceberg's planner has already decided where the seams are —
+pruning partitions, attaching delete files, computing a residual per task, and
+cutting a large file at row-group boundaries — so the endpoints are its plan,
+handed out.
 
 The invariant a client depends on is that the union of every ticket is the
 whole table, with nothing repeated and nothing lost. That is what entitles a
 client to fetch endpoints in parallel and concatenate, and `verify-iceberg`
-asserts it rather than assuming it: 6 endpoints over the fixture, row counts
-2+1+1+1+1+1, union of 7 rows with ids 1–7 and no duplicates.
+asserts it rather than assuming it: 6 endpoints over the fixture's 3 data
+files, row counts 175+175+175+75+3+4, union of 607 rows with no duplicate
+ids.
 
 `total_records` comes from the manifests via `TableScan.count`, so an
 unfiltered table is counted without opening a data file.
 
-Endpoints carry no `Location`, which Flight defines as "fetch from the server
-you asked". That is right for one process; a distributed deployment fills them
-in, and nothing else about the shape changes.
+## Where the work happens
+
+A server given worker URIs advertises them as the endpoints' `Location`, which
+is the whole difference between one process handing out several tickets and a
+fan-out across machines:
+
+```sh
+./build/serve_ice <table> --port 8816                    # a worker
+./build/serve_ice <table> --port 8817                    # another
+./build/serve_ice <table> --port 8815 \
+    --worker grpc+tcp://127.0.0.1:8816 \
+    --worker grpc+tcp://127.0.0.1:8817                   # the coordinator
+```
+
+Same binary in every role, because nothing about the protocol differs between
+them. The coordinator plans the scan and answers `GetFlightInfo`; the client
+connects to the locations it names and fetches from the workers directly, so
+the rows never pass through the coordinator. With no `--worker` the field stays
+empty, which Flight defines as "fetch from the server you asked" — still the
+right answer for a single process.
+
+Endpoints are dealt **round-robin, one location each**. Flight reads a list of
+locations as "any of these can serve this ticket", and a stock client takes the
+first, so advertising every worker on every endpoint would send the whole
+fan-out to whichever sorted first. There is no locality to preserve — the
+workers read the same object store, so any of them can serve any ticket, which
+`verify-cluster` checks by reading one ticket from both and comparing.
+
+What this is **not** is a scheduler. Nothing here retries a failed worker,
+notices a slow one, or decides how many there should be. The coordinator deals
+out a plan Iceberg already made, and the client does the fetching.
 
 ## Status
 
@@ -116,3 +147,9 @@ timestamps and a per-file split intact. `Handshake` and `ListFlights` answer
 UNIMPLEMENTED, which is a legal response a client tolerates. `FlightSource` is
 the seam: a schema, a row count, the tickets, and the batches behind one
 ticket.
+
+Endpoints can be placed on other processes, and a gate proves a client reads
+one table from two of them. What is missing above that is everything a
+scheduler does: no retries, no straggler handling, no membership, and no
+shuffle — so joins and high-cardinality group-by are out of scope rather than
+slow.
