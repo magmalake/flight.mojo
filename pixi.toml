@@ -23,6 +23,16 @@ mojo = ">=1.0.0,<1.1.0a0"
 # Building flare from source means owning its native dependencies too: it
 # dlopens shims it builds itself (libflare_tls, libflare_zlib, libflare_brotli)
 # out of these. Taking the published tin instead would bring them along.
+# The Parquet page codecs, as git dependencies rather than by source path:
+# what is needed at *runtime* is their C shims installed into the environment
+# (libzstdmojo, liblz4mojo, libbrotlimojo), which a `-I ../x.mojo/src` include
+# does not provide. Without them a server reads the uncompressed gate fixture
+# happily and then aborts on the first real table, because zstd is what
+# Iceberg writes Parquet with by default. iceberg.mojo declares them the same
+# way and for the same reason.
+zstd-mojo = { git = "https://github.com/magmalake/zstd.mojo" }
+lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo" }
+brotli-mojo = { git = "https://github.com/magmalake/brotli.mojo" }
 openssl = ">=3.0,<4"
 ca-certificates = "*"
 zlib = ">=1.3.1,<2"
@@ -56,8 +66,13 @@ verify-flight = { cmd = "bash tools/verify_flight.sh", depends-on = ["serve"] }
 #
 # `-I ../threads.mojo/compat/stable` and not `compat/nightly`: flare pins
 # mojo <1.1.0, so this environment is 1.0.0, where `Atomic` takes a `DType`.
-serve-iceberg = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake -I ../iceberg.mojo/src -I ../parquet.mojo/src -I ../arrow-mlake.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../zstd.mojo/src -I ../snappy.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../hashes.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../threads.mojo/src -I ../threads.mojo/compat/stable tools/serve_iceberg.mojo -o build/serve_ice" }
+serve-iceberg = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake -I ../iceberg.mojo/src -I ../parquet.mojo/src -I ../parquet.mojo/full/src -I ../arrow-mlake.mojo/src -I ../avro.mojo/src -I ../deflate.mojo/src -I ../thrift.mojo/src -I ../zstd.mojo/src -I ../snappy.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../hashes.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../threads.mojo/src -I ../threads.mojo/compat/stable tools/serve_iceberg.mojo -o build/serve_ice" }
 verify-iceberg = { cmd = "bash tools/verify_iceberg.sh", depends-on = ["serve-iceberg"] }
+
+# The same binary in both roles: two workers, and a coordinator whose endpoints
+# point at them. The client fetches from the workers directly, so this is the
+# gate that would fail if `Location` were dropped, wrong, or all on one worker.
+verify-cluster = { cmd = "bash tools/verify_cluster.sh", depends-on = ["serve-iceberg"] }
 
 fmt = { cmd = "mojo format src tools" }
 

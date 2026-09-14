@@ -100,6 +100,8 @@ jobs:
       - uses: actions/checkout@v4
         with: { repository: magmalake/avro.mojo, path: avro.mojo }
       - uses: actions/checkout@v4
+        with: { repository: magmalake/deflate.mojo, path: deflate.mojo }
+      - uses: actions/checkout@v4
         with: { repository: magmalake/thrift.mojo, path: thrift.mojo }
       - uses: actions/checkout@v4
         with: { repository: magmalake/zstd.mojo, path: zstd.mojo }
@@ -128,3 +130,11 @@ jobs:
       - name: pyarrow.flight reads an Iceberg table
         working-directory: flight.mojo
         run: pixi run -e verify verify-iceberg
+
+      # Two workers and a coordinator, same binary in both roles. This is the
+      # one gate that fails if endpoint `Location` is dropped or points
+      # everything at one worker: the client connects to the locations itself,
+      # so the rows have to come off a socket to a different process.
+      - name: pyarrow.flight reads it from two worker processes
+        working-directory: flight.mojo
+        run: pixi run -e verify verify-cluster

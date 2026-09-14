@@ -24,6 +24,16 @@ Flight's paths are fixed strings a client will send verbatim.
 enough to prove interoperability with a stock client. `Handshake` and
 `ListFlights` return UNIMPLEMENTED, which is a legal answer a real client
 tolerates.
+
+## Where the work happens
+
+A `FlightServer` built with a list of worker URIs advertises them as the
+endpoints' `Location`, which is the whole difference between "one server that
+happens to hand out several tickets" and a fan-out across machines. The
+response shape does not change — the same `GetFlightInfo` a single process
+answers, with the field filled in — so a client that already reads endpoints in
+parallel starts reading them from different hosts without being told anything
+new.
 """
 
 from std.collections.span import Span
@@ -42,6 +52,7 @@ from .flight_pb import (
     FlightDescriptor,
     FlightEndpoint,
     FlightInfo,
+    Location,
     SchemaResult,
     Ticket,
 )
@@ -80,8 +91,33 @@ struct FlightServer[D: Copyable & Deinitable & Movable & FlightSource](
 
     var source: Self.D
 
+    var locations: List[String]
+    """Where the endpoints say to fetch from. Empty means "from me".
+
+    A non-empty list turns this server into a **coordinator**: it still plans
+    the scan and still serves `DoGet` to anyone who asks it, but the endpoints
+    it advertises point somewhere else, so a client fetches the data from the
+    workers directly and no rows pass through here.
+
+    Placement is deliberately not the source's business. Which machines exist
+    is a property of the deployment, and the ticket is opaque bytes that any
+    worker reading the same table can honour — so a location is a routing
+    hint, not an ownership claim.
+    """
+
     def __init__(out self, var source: Self.D):
         self.source = source^
+        self.locations = List[String]()
+
+    def __init__(out self, var source: Self.D, var locations: List[String]):
+        """A coordinator that spreads its endpoints over `locations`.
+
+        Each URI is one a client will connect to verbatim
+        (`grpc+tcp://host:port`), so it has to be reachable from the *client*,
+        not merely from here.
+        """
+        self.source = source^
+        self.locations = locations^
 
     def serve_server_streaming(
         mut self,
@@ -128,12 +164,12 @@ struct FlightServer[D: Copyable & Deinitable & Movable & FlightSource](
     def _get_flight_info(
         mut self, request_bytes: Span[UInt8, _]
     ) raises -> GrpcServerStreamReply:
-        """Answer with the schema and a single self-ticketed endpoint.
+        """Answer with the schema and one endpoint per unit of work.
 
-        The endpoint carries no `Location`, which Flight defines as "fetch
-        from the same server you asked" — the right answer for a single-node
-        server and the one that avoids inventing a hostname the client may not
-        be able to reach.
+        With no `locations` configured the endpoints carry no `Location`,
+        which Flight defines as "fetch from the same server you asked" — the
+        right answer for a single process, and the one that avoids inventing a
+        hostname the client may not be able to reach.
         """
         var desc = FlightDescriptor()
         try:
@@ -145,16 +181,30 @@ struct FlightServer[D: Copyable & Deinitable & Movable & FlightSource](
         info.schema = _encapsulated_schema(self.source.fields())
         info.flight_descriptor = desc^
 
-        # One endpoint per ticket. No `Location` on any of them, which Flight
-        # defines as "fetch from the server you asked" — right for a single
-        # process, and it avoids inventing a hostname the client may not be
-        # able to reach. A distributed deployment fills these in.
+        # One endpoint per ticket, dealt round-robin over the workers.
+        #
+        # One location each, not all of them on every endpoint: Flight reads a
+        # list as "any of these can serve this ticket", which is a statement
+        # about replication, and a stock client takes the first. Advertising
+        # every worker on every endpoint would therefore send the whole
+        # fan-out to whichever one sorted first — the opposite of the point.
+        # Dealing them out spreads the work with a client that does the
+        # obvious thing.
+        #
+        # Round-robin and not data locality, because there is none to have:
+        # the workers read the same object store, so any of them can serve any
+        # ticket. What placement buys here is parallelism, and the assignment
+        # is stable for a given plan because the ticket order is.
         var tickets = self.source.tickets()
         for i in range(len(tickets)):
             var ticket = Ticket()
             ticket.ticket = _to_list(tickets[i].as_bytes())
             var ep = FlightEndpoint()
             ep.ticket = ticket^
+            if len(self.locations) > 0:
+                var loc = Location()
+                loc.uri = self.locations[i % len(self.locations)]
+                ep.location.append(loc^)
             info.endpoint.append(ep^)
 
         info.total_records = Int64(self.source.total_records())
