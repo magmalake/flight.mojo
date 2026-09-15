@@ -46,6 +46,7 @@ Run:
 """
 
 from std.sys import argv
+from std.sys.info import num_logical_cores
 
 from arrow_mlake.arrow import (
     AT_BOOL,
@@ -371,7 +372,7 @@ struct IcebergSource(Copyable, FlightSource, Movable):
 
 comptime USAGE = (
     "usage: serve_iceberg <table-dir> [--port N] [--worker URI]..."
-    " [--columns a,b,c] [--split-size BYTES]"
+    " [--columns a,b,c] [--split-size BYTES] [--workers N]"
 )
 
 
@@ -400,6 +401,7 @@ def main() raises:
     var workers = List[String]()
     var columns = List[String]()
     var split_size = DEFAULT_SPLIT_SIZE
+    var num_workers = 0  # 0: one reactor per core
 
     var i = 2
     while i < len(args):
@@ -409,6 +411,8 @@ def main() raises:
             return
         if flag == String("--port"):
             port = UInt16(atol(String(args[i + 1])))
+        elif flag == String("--workers"):
+            num_workers = atol(String(args[i + 1]))
         elif flag == String("--split-size"):
             split_size = atol(String(args[i + 1]))
         elif flag == String("--columns"):
@@ -454,4 +458,13 @@ def main() raises:
         for w in workers:
             print("  worker:", w, flush=True)
 
-    srv.serve(GrpcStreamingService(FlightServer(src^, workers^)))
+    # One reactor per core by default. A single worker answers DoGets
+    # strictly one at a time, so a client fanning out over N endpoints gets
+    # no parallelism from the fan-out at all: 87 splits of the taxi table at
+    # ~740 ms each is a minute of wall clock spent almost entirely waiting in
+    # line. Each worker takes its own copy of the handler, and the source it
+    # holds is a table path, a projection and a snapshot id -- values, not
+    # shared state -- so a copy per worker costs nothing and shares nothing.
+    var reactors = num_workers if num_workers > 0 else num_logical_cores()
+    print("  reactors:", reactors, flush=True)
+    srv.serve(GrpcStreamingService(FlightServer(src^, workers^)), reactors)
