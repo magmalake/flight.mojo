@@ -45,7 +45,8 @@ Run:
         --worker grpc+tcp://127.0.0.1:8817
 """
 
-from std.sys import argv
+from std.memory import unsafe_memcpy
+from std.sys import argv, size_of
 from std.sys.info import num_logical_cores
 
 from arrow_mlake.arrow import (
@@ -192,6 +193,41 @@ def _dtype_of(a: ArrayData) raises -> Int:
     )
 
 
+def _fill_i64(mut out: List[Int64], buf: Span[UInt8, _], length: Int) raises:
+    """`length` int64s out of an Arrow buffer, in one copy."""
+    var n = length * size_of[Int64]()
+    if n == 0:
+        return
+    if len(buf) < n:
+        raise Error("flight: values buffer is shorter than the array")
+    out.resize(unsafe_uninit_length=length)
+    unsafe_memcpy(
+        dest=out.unsafe_ptr().unsafe_bitcast[UInt8](),
+        src=buf.unsafe_ptr(),
+        count=n,
+    )
+
+
+def _fill_f64(mut out: List[Float64], buf: Span[UInt8, _], length: Int) raises:
+    """`length` float64s out of an Arrow buffer, in one copy.
+
+    Two functions rather than one generic: `resize(unsafe_uninit_length=)`
+    wants a concrete element type to prove itself against, and there are
+    exactly two fixed-width types this writer encodes.
+    """
+    var n = length * size_of[Float64]()
+    if n == 0:
+        return
+    if len(buf) < n:
+        raise Error("flight: values buffer is shorter than the array")
+    out.resize(unsafe_uninit_length=length)
+    unsafe_memcpy(
+        dest=out.unsafe_ptr().unsafe_bitcast[UInt8](),
+        src=buf.unsafe_ptr(),
+        count=n,
+    )
+
+
 def _to_column(a: ArrayData) raises -> Column:
     """Copy one Arrow array into a `Column`.
 
@@ -199,21 +235,21 @@ def _to_column(a: ArrayData) raises -> Column:
     buffers. Passing the buffers straight through would avoid this and is the
     obvious optimisation once the shape is settled — the bytes are already in
     Arrow layout, which is the whole point of the format.
+
+    Until then the copy is at least one copy: a fixed-width Arrow buffer and
+    the `List` that receives it have the same little-endian layout, so this is
+    a `memcpy` rather than a load and an append per value.
     """
     var dt = _dtype_of(a)
     var col: Column
 
     if dt == DT_INT64 or dt == DT_TIMESTAMP:
         var v = List[Int64]()
-        var buf = Span(a.values)
-        for i in range(a.length):
-            v.append(load_i64(buf, i))
+        _fill_i64(v, Span(a.values), a.length)
         col = Column.int64(v^) if dt == DT_INT64 else Column.timestamp(v^)
     elif dt == DT_FLOAT64:
         var v = List[Float64]()
-        var buf = Span(a.values)
-        for i in range(a.length):
-            v.append(load_f64(buf, i))
+        _fill_f64(v, Span(a.values), a.length)
         col = Column.float64(v^)
     elif dt == DT_BOOL:
         var v = List[Bool]()

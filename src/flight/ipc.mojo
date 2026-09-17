@@ -31,8 +31,8 @@ Dictionaries, nested types and compression are not implemented, and a batch
 using them is rejected rather than half-written.
 """
 
-from std.memory import memcpy
 
+from std.memory import unsafe_memcpy
 from .flatbuf import FlatBufferBuilder
 
 # org.apache.arrow.flatbuf.MetadataVersion
@@ -109,8 +109,20 @@ def _pad8(n: Int) -> Int:
 
 
 def _append(mut out: List[UInt8], src: Span[UInt8, _]):
-    for i in range(len(src)):
-        out.append(src[i])
+    """Append `src` whole.
+
+    On the framing path `src` is an entire record-batch body, so a byte at a
+    time is a scalar pass over everything the server is about to send — it
+    cost more than reading the rows did.
+    """
+    var n = len(src)
+    if n == 0:
+        return
+    var base = len(out)
+    out.resize(unsafe_uninit_length=base + n)
+    unsafe_memcpy(
+        dest=out.unsafe_ptr().unsafe_offset(base), src=src.unsafe_ptr(), count=n
+    )
 
 
 def _append_i32_le(mut out: List[UInt8], v: Int):
