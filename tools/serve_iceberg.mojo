@@ -305,6 +305,14 @@ struct IcebergSource(Copyable, FlightSource, Movable):
     ticket names a task the re-plan does not have."""
     var snapshot_id: Int64
     """The snapshot every scan from this source reads. Chosen once."""
+    var schema_fields: List[FieldSpec]
+    """The Arrow schema, resolved once at construction.
+
+    `fields()` is asked on every `GetFlightInfo` and again on every `DoGet` —
+    a client needs the schema before it decides to read, and a stream opens
+    with it. Deriving it from a scan each time cost a **scan each time**, and
+    the snapshot is pinned anyway, so there is nothing to re-derive.
+    """
 
     def __init__(
         out self,
@@ -318,6 +326,29 @@ struct IcebergSource(Copyable, FlightSource, Movable):
         self.snapshot_id = (
             _open(self.table_dir, self.columns).snapshot().snapshot_id
         )
+        self.schema_fields = List[FieldSpec]()
+        # One row, not a table: `ScanOptions.limit` stops the scan after the
+        # first batch, and a batch carries the schema whatever its length.
+        var options = ScanOptions()
+        options.limit = 1
+        var batches = (
+            _open(self.table_dir, self.columns)
+            .use_snapshot(self.snapshot_id)
+            .with_split_size(self.split_size)
+            .to_batches(options)
+        )
+        if len(batches) == 0:
+            return
+        ref b = batches[0]
+        for i in range(len(b.roots)):
+            ref a = b.arena.nodes[b.roots[i]]
+            # unit and tz ride along from the scanned column: arrow-mlake's
+            # TU_* are Arrow's TimeUnit values, so nothing is translated.
+            self.schema_fields.append(
+                FieldSpec(
+                    a.name, _dtype_of(a), a.nullable, a.type.unit, a.type.tz
+                )
+            )
 
     def _scan(self) raises -> TableScan:
         return (
@@ -347,21 +378,8 @@ struct IcebergSource(Copyable, FlightSource, Movable):
         return out^
 
     def fields(self) raises -> List[FieldSpec]:
-        var batches = self._scan().to_batches(ScanOptions())
-        var out = List[FieldSpec]()
-        if len(batches) == 0:
-            return out^
-        ref b = batches[0]
-        for i in range(len(b.roots)):
-            ref a = b.arena.nodes[b.roots[i]]
-            # unit and tz ride along from the scanned column: arrow-mlake's
-            # TU_* are Arrow's TimeUnit values, so nothing is translated.
-            out.append(
-                FieldSpec(
-                    a.name, _dtype_of(a), a.nullable, a.type.unit, a.type.tz
-                )
-            )
-        return out^
+        """The schema this source serves, resolved at construction."""
+        return self.schema_fields.copy()
 
     def total_records(self) raises -> Int:
         """Answered from the manifests where possible.
