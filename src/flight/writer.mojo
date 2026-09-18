@@ -24,7 +24,8 @@ empty. A tagged union would be tidier, but this stays legible in a format
 where a misplaced buffer produces silent garbage rather than an error.
 """
 
-from std.memory import bitcast
+from std.memory import bitcast, unsafe_memcpy, unsafe_memset
+from std.sys import size_of
 
 from .ipc import (
     BufferSpec,
@@ -123,6 +124,20 @@ def _push_bitmap(mut body: List[UInt8], bits: List[Bool], rows: Int):
     an all-ones validity bitmap rather than an absent one.
     """
     var nbytes = (rows + 7) // 8
+    if len(bits) == 0:
+        # Every row valid: all ones, with the bits past `rows` in the last
+        # byte cleared. Arrow ignores them, but a reader comparing bitmaps
+        # byte for byte does not, and neither does anyone reading a hex dump.
+        var base = len(body)
+        body.resize(unsafe_uninit_length=base + nbytes)
+        unsafe_memset(
+            ptr=body.unsafe_ptr().unsafe_offset(base), value=0xFF, count=nbytes
+        )
+        var spare = nbytes * 8 - rows
+        if spare > 0 and nbytes > 0:
+            body[base + nbytes - 1] = UInt8((1 << (8 - spare)) - 1)
+        _pad_to8(body)
+        return
     for byte_i in range(nbytes):
         var acc: UInt8 = 0
         for bit in range(8):
@@ -150,6 +165,27 @@ def _push_i32(mut body: List[UInt8], v: Int):
 
 def _push_f64(mut body: List[UInt8], v: Float64):
     _push_i64(body, Int64(bitcast[DType.int64](v)))
+
+
+def _push_fixed[T: Copyable & Movable](mut body: List[UInt8], values: List[T]):
+    """A whole fixed-width values buffer, in one copy.
+
+    Arrow IPC is little-endian and so is every platform this builds for, so
+    the list is already the buffer: what the shift-per-byte loop above spells
+    out, eight times per value, is a `memcpy`. On a million-row batch that is
+    the difference between the encoder costing more than the scan and costing
+    nothing worth measuring.
+    """
+    var n = len(values) * size_of[T]()
+    if n == 0:
+        return
+    var base = len(body)
+    body.resize(unsafe_uninit_length=base + n)
+    unsafe_memcpy(
+        dest=body.unsafe_ptr().unsafe_offset(base),
+        src=values.unsafe_ptr().unsafe_bitcast[UInt8](),
+        count=n,
+    )
 
 
 def encode_batch(
@@ -185,14 +221,12 @@ def encode_batch(
             # A timestamp is an int64 on the wire; only the schema knows it
             # means a moment rather than a number.
             start = len(body)
-            for i in range(rows):
-                _push_i64(body, col.i64[i])
+            _push_fixed(body, col.i64)
             _pad_to8(body)
             specs.append(BufferSpec(start, len(body) - start))
         elif col.dtype == DT_FLOAT64:
             start = len(body)
-            for i in range(rows):
-                _push_f64(body, col.f64[i])
+            _push_fixed(body, col.f64)
             _pad_to8(body)
             specs.append(BufferSpec(start, len(body) - start))
         elif col.dtype == DT_BOOL:

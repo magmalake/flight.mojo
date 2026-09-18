@@ -37,6 +37,8 @@ new.
 """
 
 from std.collections.span import Span
+from std.os import getenv
+from std.time import perf_counter_ns
 
 from flare.grpc import (
     GrpcCallContext,
@@ -212,14 +214,26 @@ struct FlightServer[D: Copyable & Deinitable & Movable & FlightSource](
 
         var msgs = List[List[UInt8]]()
         msgs.append(info.encode())
-        return GrpcServerStreamReply.ok(msgs^)
+        # Never gzip a record batch. Every gRPC client advertises
+        # `grpc-accept-encoding: gzip`, and flare compresses when it is
+        # offered — which for Arrow buffers ran at about 25 MB/s and was 98%
+        # of what a client waited for, against 16 ms of actually reading the
+        # rows. Arrow's whole argument is that the consumer casts the buffers
+        # where they land; deflating them on the way out gives that up twice.
+        return GrpcServerStreamReply.ok(msgs^, compress=False)
 
     def _get_schema(mut self) raises -> GrpcServerStreamReply:
         var res = SchemaResult()
         res.schema = _encapsulated_schema(self.source.fields())
         var msgs = List[List[UInt8]]()
         msgs.append(res.encode())
-        return GrpcServerStreamReply.ok(msgs^)
+        # Never gzip a record batch. Every gRPC client advertises
+        # `grpc-accept-encoding: gzip`, and flare compresses when it is
+        # offered — which for Arrow buffers ran at about 25 MB/s and was 98%
+        # of what a client waited for, against 16 ms of actually reading the
+        # rows. Arrow's whole argument is that the consumer casts the buffers
+        # where they land; deflating them on the way out gives that up twice.
+        return GrpcServerStreamReply.ok(msgs^, compress=False)
 
     def _do_get(
         mut self, request_bytes: Span[UInt8, _]
@@ -251,15 +265,48 @@ struct FlightServer[D: Copyable & Deinitable & Movable & FlightSource](
         schema_msg.data_header = build_schema_message(fields)
         msgs.append(schema_msg.encode())
 
+        # FLIGHT_TIMING=1 splits one DoGet into its stages. What a client
+        # waits for and what the server spends are different numbers, and
+        # without both there is no way to tell an expensive read from an
+        # expensive send.
+        var timing = getenv("FLIGHT_TIMING", "") != ""
+        var t0 = perf_counter_ns()
         var batches = self.source.batches(which)
+        var t1 = perf_counter_ns()
+        var rows = 0
+        var bytes_out = 0
         for i in range(len(batches)):
             var pair = encode_batch(fields, batches[i])
             var fd = FlightData()
             fd.data_header = pair[0].copy()
             fd.data_body = pair[1].copy()
+            rows += batches[i][0].length() if len(batches[i]) else 0
+            bytes_out += len(fd.data_body)
             msgs.append(fd.encode())
+        var t2 = perf_counter_ns()
+        if timing:
+            print(
+                "do_get:",
+                len(batches),
+                "batch(es),",
+                rows,
+                "rows, read",
+                (t1 - t0) // 1000000,
+                "ms, encode",
+                (t2 - t1) // 1000000,
+                "ms,",
+                bytes_out // (1024 * 1024),
+                "MiB",
+                flush=True,
+            )
 
-        return GrpcServerStreamReply.ok(msgs^)
+        # Never gzip a record batch. Every gRPC client advertises
+        # `grpc-accept-encoding: gzip`, and flare compresses when it is
+        # offered — which for Arrow buffers ran at about 25 MB/s and was 98%
+        # of what a client waited for, against 16 ms of actually reading the
+        # rows. Arrow's whole argument is that the consumer casts the buffers
+        # where they land; deflating them on the way out gives that up twice.
+        return GrpcServerStreamReply.ok(msgs^, compress=False)
 
 
 trait FlightSource(Movable):
