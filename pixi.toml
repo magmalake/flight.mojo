@@ -66,7 +66,7 @@ verify-flight = { cmd = "bash tools/verify_flight.sh", depends-on = ["serve"] }
 #
 # `-I ../threads.mojo/compat/stable` and not `compat/nightly`: flare pins
 # mojo <1.1.0, so this environment is 1.0.0, where `Atomic` takes a `DType`.
-serve-iceberg = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake -I ../iceberg.mojo/src -I ../parquet.mojo/src -I ../parquet.mojo/full/src -I ../arrow-mlake.mojo/src -I ../avro.mojo/src -I ../deflate.mojo/src -I ../thrift.mojo/src -I ../zstd.mojo/src -I ../snappy.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../hashes.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../threads.mojo/src -I ../threads.mojo/compat/stable tools/serve_iceberg.mojo -o build/serve_ice" }
+serve-iceberg = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake -I ../iceberg.mojo/src -I ../parquet.mojo/src -I ../parquet.mojo/full/src -I ../arrow-mlake.mojo/src -I ../memory-region.mojo/src -I ../avro.mojo/src -I ../deflate.mojo/src -I ../thrift.mojo/src -I ../zstd.mojo/src -I ../snappy.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../hashes.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../threads.mojo/src -I ../threads.mojo/compat/stable tools/serve_iceberg.mojo -o build/serve_ice" }
 verify-iceberg = { cmd = "bash tools/verify_iceberg.sh", depends-on = ["serve-iceberg"] }
 
 # The same binary in both roles: two workers, and a coordinator whose endpoints
