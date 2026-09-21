@@ -25,7 +25,7 @@ vtable, costing a few bytes per message. Arrow messages are small and are
 written once per batch, so the bytes are not worth the bookkeeping.
 """
 
-from std.memory import memcpy
+from std.memory import unsafe_memcpy
 
 
 struct FlatBufferBuilder(Movable):
@@ -87,9 +87,9 @@ struct FlatBufferBuilder(Movable):
         var bigger = List[UInt8]()
         bigger.resize(new_len, 0)
         if live > 0:
-            memcpy(
-                dest=bigger.unsafe_ptr() + (new_len - live),
-                src=self._buf.unsafe_ptr() + self._head,
+            unsafe_memcpy(
+                dest=bigger.unsafe_ptr().unsafe_offset(new_len - live),
+                src=self._buf.unsafe_ptr().unsafe_offset(self._head),
                 count=live,
             )
         self._buf = bigger^
@@ -299,9 +299,9 @@ struct FlatBufferBuilder(Movable):
         var out = List[UInt8]()
         var n = self.offset()
         out.resize(n, 0)
-        memcpy(
+        unsafe_memcpy(
             dest=out.unsafe_ptr(),
-            src=self._buf.unsafe_ptr() + self._head,
+            src=self._buf.unsafe_ptr().unsafe_offset(self._head),
             count=n,
         )
         return out^

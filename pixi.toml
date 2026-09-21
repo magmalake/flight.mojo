@@ -1,6 +1,6 @@
 [workspace]
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
-channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
+channels = ["https://conda.modular.com/max", "conda-forge"]
 name = "flight.mojo"
 version = "0.1.0"
 description = "Apache Arrow Flight for Mojo — an IPC writer and a Flight server over flare's gRPC"
@@ -8,14 +8,12 @@ preview = ["pixi-build"]
 platforms = ["osx-arm64", "linux-64"]
 
 [dependencies]
-# Capped below 1.1.0 because flare is: its `Atomic[DType.…]` is the Mojo 1.0
-# spelling, and on a 1.1.0.dev nightly `Atomic` takes a type instead, so the
-# whole runtime fails to compile. This tracks flare's own pin and should move
-# when flare's does — not before.
-#
-# `<1.1.0a0`, not `<1.1.0`: conda sorts `1.1.0.dev2026090905` *below* `1.1.0`,
-# so the plain bound quietly admits every nightly it was meant to exclude.
-mojo = ">=1.0.0,<1.1.0a0"
+# Tracks flare's pin, which is what this cap was always for. flare used to
+# spell `Atomic[DType.…]` — the Mojo 1.0 form — so anything pulling flare in
+# was held below 1.1.0. Upstream flare moved to `Atomic[T]` and floored itself
+# at 1.1.0 (ehsanmok/flare#31, fixed in `f6b5b16`), and flare_mlake 0.10.2
+# carries that, so the cap comes off.
+mojo = ">=1.1.0,<2.0.0"
 # flare supplies HTTP/2, gRPC framing and the server; see tins = ["flare_mlake"]
 # in shelf.toml. Consumed by source path during development
 # (`-I ../flare_mlake`), the same way the other magmalake tins are.
@@ -57,16 +55,17 @@ verify-ipc = { cmd = "python tools/verify_ipc.py", depends-on = ["emit"] }
 # `-I ../threads.mojo/...` is required by flare itself, not by this demo:
 # flare's threading is an adapter over threads.mojo, so anything compiling
 # flare from source needs it on the path.
-serve = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake -I ../threads.mojo/src -I ../threads.mojo/compat/stable tools/serve_demo.mojo -o build/serve" }
+serve = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake -I ../threads.mojo/src -I ../threads.mojo/compat tools/serve_demo.mojo -o build/serve" }
 verify-flight = { cmd = "bash tools/verify_flight.sh", depends-on = ["serve"] }
 
 # The Iceberg-backed server pulls in the whole read stack, which is why the
 # include list is long: iceberg needs avro and parquet, parquet needs arrow,
 # thrift and the four codecs, and everything needs threads.
 #
-# `-I ../threads.mojo/compat/stable` and not `compat/nightly`: flare pins
-# mojo <1.1.0, so this environment is 1.0.0, where `Atomic` takes a `DType`.
-serve-iceberg = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake -I ../iceberg.mojo/src -I ../parquet.mojo/src -I ../parquet.mojo/full/src -I ../arrow-mlake.mojo/src -I ../avro.mojo/src -I ../deflate.mojo/src -I ../thrift.mojo/src -I ../zstd.mojo/src -I ../snappy.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../hashes.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../threads.mojo/src -I ../threads.mojo/compat/stable tools/serve_iceberg.mojo -o build/serve_ice" }
+# threads.mojo 0.6.0 collapsed `compat/stable` and `compat/nightly` into one
+# `compat/`: the split carried the spelling of `std.atomic.Atomic`'s
+# parameter, which only Mojo 1.0.0 took as a `DType`.
+serve-iceberg = { cmd = "mkdir -p build && mojo build -I src -I ../flare_mlake -I ../iceberg.mojo/src -I ../parquet.mojo/src -I ../parquet.mojo/full/src -I ../arrow-mlake.mojo/src -I ../avro.mojo/src -I ../deflate.mojo/src -I ../thrift.mojo/src -I ../zstd.mojo/src -I ../snappy.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../hashes.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../threads.mojo/src -I ../threads.mojo/compat tools/serve_iceberg.mojo -o build/serve_ice" }
 verify-iceberg = { cmd = "bash tools/verify_iceberg.sh", depends-on = ["serve-iceberg"] }
 
 # The same binary in both roles: two workers, and a coordinator whose endpoints
