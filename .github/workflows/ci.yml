@@ -97,6 +97,9 @@ jobs:
         with: { repository: magmalake/parquet.mojo, path: parquet.mojo }
       - uses: actions/checkout@v4
         with: { repository: magmalake/arrow-mlake.mojo, path: arrow-mlake.mojo }
+      # arrow-mlake exports into a memory region, so the tin travels with it.
+      - uses: actions/checkout@v4
+        with: { repository: magmalake/memory-region.mojo, path: memory-region.mojo }
       - uses: actions/checkout@v4
         with: { repository: magmalake/avro.mojo, path: avro.mojo }
       - uses: actions/checkout@v4
