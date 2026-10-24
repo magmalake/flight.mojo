@@ -12,8 +12,8 @@ platforms = ["osx-arm64", "linux-64"]
 # spell `Atomic[DType.…]` — the Mojo 1.0 form — so anything pulling flare in
 # was held below 1.1.0. Upstream flare moved to `Atomic[T]` and floored itself
 # at 1.1.0 (ehsanmok/flare#31, fixed in `f6b5b16`), and flare_mlake 0.10.2
-# carries that, so the cap comes off.
-mojo = ">=1.1.0,<2.0.0"
+# carries that, so the cap comes off. flare_mlake 0.13.0 floors at 1.2.0.
+mojo = ">=1.2.0,<2.0.0"
 # flare supplies HTTP/2, gRPC framing and the server; see tins = ["flare_mlake"]
 # in shelf.toml. Consumed by source path during development
 # (`-I ../flare_mlake`), the same way the other magmalake tins are.
@@ -28,9 +28,9 @@ mojo = ">=1.1.0,<2.0.0"
 # happily and then aborts on the first real table, because zstd is what
 # Iceberg writes Parquet with by default. iceberg.mojo declares them the same
 # way and for the same reason.
-zstd-mojo = { git = "https://github.com/magmalake/zstd.mojo" }
-lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo" }
-brotli-mojo = { git = "https://github.com/magmalake/brotli.mojo" }
+zstd-mojo = { git = "https://github.com/magmalake/zstd.mojo", rev = "c468fa2378d999753968288f3de33d904d5bb701" }
+lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "5e0b29831ec292daac2ef8226d28a959288b66ae" }
+brotli-mojo = { git = "https://github.com/magmalake/brotli.mojo", rev = "0ba0e088d382d28036006968bcb015eaccacdd6e" }
 openssl = ">=3.0,<4"
 ca-certificates = "*"
 zlib = ">=1.3.1,<2"
