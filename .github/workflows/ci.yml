@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # macOS runs here, nightly and by hand (Actions > CI > Run workflow), not on
+  # PRs or main: GitHub's hosted macOS pool is short on capacity, and a job
+  # that never gets a runner fails the required `ci` gate.
+  schedule:
+    - cron: '18 7 * * *'
+  workflow_dispatch:
 
 # Every gate here is pyarrow reading what this repo wrote. That is deliberate:
 # a writer checked only against a reader we also wrote proves the two agree and
@@ -48,7 +54,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["ubuntu-latest", "macos-latest"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -71,7 +77,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["ubuntu-latest", "macos-latest"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -114,7 +120,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["ubuntu-latest", "macos-latest"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -178,7 +184,7 @@ jobs:
   # The one check to require: every job above passed or, on a release-only PR,
   # was skipped in favour of the release job's consumer build.
   ci:
-    if: ${{ always() }}
+    if: ${{ always() && github.event_name != 'schedule' }}
     needs: [release, release-check, ipc, flight, iceberg]
     runs-on: ubuntu-latest
     steps:
