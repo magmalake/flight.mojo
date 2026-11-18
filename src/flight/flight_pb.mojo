@@ -10,8 +10,6 @@ from std.collections.span import Span
 from flare.grpc.proto import (
     ProtoReader,
     ProtoWriter,
-    WIRE_I32,
-    WIRE_I64,
     WIRE_LEN,
     WIRE_VARINT,
 )
@@ -20,7 +18,6 @@ from flare.grpc import (
     GrpcBidiStreaming,
     GrpcCallContext,
     GrpcClient,
-    GrpcClientStreaming,
     GrpcServerStream,
     GrpcServerStreamReply,
     GrpcServerStreaming,

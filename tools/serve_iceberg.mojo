@@ -57,8 +57,6 @@ from arrow_mlake.arrow import (
     AT_UTF8,
     ArrayData,
     bit_get,
-    load_f64,
-    load_i64,
 )
 from flare.grpc import GrpcStreamingService
 from flare.http import HttpServer
@@ -69,7 +67,6 @@ from iceberg.io import FileIO
 from iceberg.metadata import TableMetadata
 from iceberg.read import ScanOptions
 from iceberg.scan import TableScan
-from parquet.reader import RecordBatch
 
 from flight.ipc import (
     DT_BOOL,
