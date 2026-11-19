@@ -86,7 +86,7 @@ def _to_list(s: Span[UInt8, _]) -> List[UInt8]:
     return out^
 
 
-struct FlightServer[D: Copyable & Deinitable & Movable & FlightSource](
+struct FlightServer[D: Copyable & Deinitable & FlightSource](
     Copyable, GrpcServerStreaming, GrpcUnary, Movable
 ):
     """Serves one `FlightSource` over the Flight protocol."""
