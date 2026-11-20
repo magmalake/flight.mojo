@@ -167,7 +167,7 @@ def _push_f64(mut body: List[UInt8], v: Float64):
     _push_i64(body, Int64(bitcast[DType.int64](v)))
 
 
-def _push_fixed[T: Copyable & Movable](mut body: List[UInt8], values: List[T]):
+def _push_fixed[T: Copyable](mut body: List[UInt8], values: List[T]):
     """A whole fixed-width values buffer, in one copy.
 
     Arrow IPC is little-endian and so is every platform this builds for, so

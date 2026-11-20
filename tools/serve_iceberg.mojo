@@ -410,7 +410,7 @@ struct IcebergSource(Copyable, FlightSource, Movable):
             _open(self.table_dir, self.columns)
             .use_snapshot(snapshot)
             .with_split_size(self.split_size)
-            .to_batches_for_splits(paths^, starts^, ScanOptions())
+            .to_batches_for_splits(paths, starts, ScanOptions())
         )
         for bi in range(len(batches)):
             ref b = batches[bi]

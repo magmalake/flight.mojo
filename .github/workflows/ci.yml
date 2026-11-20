@@ -28,6 +28,7 @@ jobs:
       pull-requests: read
     with:
       classify-only: true
+      mojo-compiler: "==1.3.0.dev2026111805"
 
   release-check:
     needs: release
@@ -40,6 +41,7 @@ jobs:
       # The test legs below are skipped on release PRs, and the consumer build
       # is the check (the tests build against sibling checkouts of the other tins).
       task: ""
+      mojo-compiler: "==1.3.0.dev2026111805"
 
 
   # The IPC writer alone — no flare, no server, no sibling checkouts. Kept
