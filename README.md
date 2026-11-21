@@ -79,6 +79,7 @@ pixi run -e verify verify-ipc       # pyarrow reads an IPC stream we wrote
 pixi run -e verify verify-flight    # pyarrow.flight drives the in-memory server
 pixi run -e verify verify-iceberg   # pyarrow.flight reads a real Iceberg table
 pixi run -e verify verify-cluster   # ...from two worker processes behind a coordinator
+pixi run test                       # the status each bad request is answered with
 ```
 
 `verify-iceberg` compares rows **keyed by id**, not by position: neither
@@ -106,6 +107,37 @@ ids.
 
 `total_records` comes from the manifests via `TableScan.count`, so an
 unfiltered table is counted without opening a data file.
+
+## A bad ticket is the client's mistake, and is answered as one
+
+A ticket is whatever bytes a client sends, so the server says *whose* mistake
+a failure was, with a status a client can act on. INTERNAL means the server
+itself failed, and nothing else:
+
+| ticket | status | pyarrow raises |
+|---|---|---|
+| not a `Ticket` message, or not UTF-8 | INVALID_ARGUMENT | `ArrowInvalid` |
+| not `<snapshot>\|<start>\|<length>\|<path>`: missing fields, a non-integer, a negative start or length, an empty path | INVALID_ARGUMENT | `ArrowInvalid` |
+| a snapshot the table does not have, or no longer has | NOT_FOUND | `ArrowKeyError` |
+| a snapshot the table has, and a split its plan does not contain | OK, an empty stream | — |
+| well formed, and the server then fails reading the table | INTERNAL | `FlightInternalError` |
+
+The middle two rows are the distinction worth having. A ticket for a snapshot
+that is still there reads that snapshot, however many commits have landed
+since, and a split that snapshot does not have holds none of its rows: the
+stream is empty, which is Iceberg's own rule for a stale ticket
+(`to_batches_for_splits`), so that a worker holding one does not fail a query.
+A snapshot that is gone has nothing to be read against, and answering it with
+nothing would let a client that fans out assemble a table with that part
+silently missing; NOT_FOUND tells it to plan again.
+
+A `FlightSource` picks these by raising `invalid_argument` or `not_found`
+(`flight.server`). Anything else it raises is INTERNAL with a fixed message;
+the text goes to the server's stderr, not to the client, because it can hold
+paths and whatever else the exception carried. A `FlightDescriptor` to
+`GetFlightInfo` or `GetSchema` that does not parse is INVALID_ARGUMENT too.
+`verify-flight` and `verify-iceberg` assert each row through pyarrow, and
+`pixi run test` the cases pyarrow cannot send.
 
 ## Where the work happens
 

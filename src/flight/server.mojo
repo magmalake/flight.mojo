@@ -25,6 +25,26 @@ enough to prove interoperability with a stock client. `Handshake` and
 `ListFlights` return UNIMPLEMENTED, which is a legal answer a real client
 tolerates.
 
+## Whose mistake it was
+
+Every answer that is not OK carries a deliberate status, because a client
+decides what to do next from the code and nothing else:
+
+| status | when | what a client should do |
+|---|---|---|
+| `INVALID_ARGUMENT` | the request cannot be parsed: a malformed descriptor or `Ticket` message, a ticket that is not UTF-8, or one the source cannot read (`invalid_argument`) | fix the request; retrying it is pointless |
+| `NOT_FOUND` | a well-formed request names something that does not exist, such as a snapshot the table does not have (`not_found`) | plan again with `GetFlightInfo` |
+| `UNIMPLEMENTED` | a Flight method this server does not serve | do without it |
+| `INTERNAL` | anything else: the server failed | report it; the cause is in the server's log |
+
+A source picks the first two by raising `flight_error` (or its
+`invalid_argument` / `not_found` shorthands). Any other raise is a server
+fault and becomes INTERNAL with a fixed message, its text written to the
+server's stderr and not to the client, the same rule flare applies to a
+handler that raises: the text can hold paths and anything else the exception
+carried. Without this a typo in a ticket and a corrupt table would reach the
+client as the same flare "handler raised".
+
 ## Where the work happens
 
 A `FlightServer` built with a list of worker URIs advertises them as the
@@ -38,6 +58,7 @@ new.
 
 from std.collections.span import Span
 from std.os import getenv
+from std.sys import stderr
 from std.time import perf_counter_ns
 
 from flare.grpc import (
@@ -66,6 +87,69 @@ comptime PATH_GET_SCHEMA: StaticString = "/arrow.flight.protocol.FlightService/G
 comptime PATH_DO_GET: StaticString = "/arrow.flight.protocol.FlightService/DoGet"
 
 
+comptime _STATUS_TAG: StaticString = "flight-status:"
+"""Prefix of an `Error` that names the gRPC status it should be answered with.
+
+An `Error` carries only text, so the code travels in it:
+`flight-status:<code>:<message>`. Only `flight_error` writes it and only
+`status_for` reads it.
+"""
+
+
+def flight_error(code: Int, message: String) -> Error:
+    """An error that `FlightServer` answers with status `code` and `message`.
+
+    For a `FlightSource` to say the *client* got something wrong. `message`
+    goes to the client verbatim, so it should name what was wrong with the
+    request and nothing about the server's files.
+    """
+    return Error(String(_STATUS_TAG) + String(code) + String(":") + message)
+
+
+def invalid_argument(message: String) -> Error:
+    """The request cannot be parsed: answered INVALID_ARGUMENT."""
+    return flight_error(GrpcStatus.INVALID_ARGUMENT, message)
+
+
+def not_found(message: String) -> Error:
+    """The request is well formed and names something that does not exist:
+    answered NOT_FOUND."""
+    return flight_error(GrpcStatus.NOT_FOUND, message)
+
+
+comptime INTERNAL_MESSAGE: StaticString = (
+    "flight: the server failed; the cause is in its log"
+)
+"""What a client is told about a server fault. The cause stays in the log."""
+
+
+def status_for(e: Error) -> GrpcStatus:
+    """The status to answer a raise with.
+
+    A `flight_error` keeps its code and message. Anything else is a server
+    fault: INTERNAL, with the text logged here rather than sent, because it
+    can hold file paths and whatever else the exception carried. A tag naming
+    OK or a code outside gRPC's range is a bug in the raiser and is a server
+    fault too, rather than an error answered as success.
+    """
+    var text = String(e)
+    var tag = String(_STATUS_TAG)
+    if text.startswith(tag):
+        var rest = String(text[byte = tag.byte_length() :])
+        var colon = rest.find(":").or_else(-1)
+        if colon > 0:
+            try:
+                var code = atol(rest[byte=:colon])
+                if code > GrpcStatus.OK and code <= GrpcStatus.UNAUTHENTICATED:
+                    return GrpcStatus.err(
+                        code, String(rest[byte = colon + 1 :])
+                    )
+            except:
+                pass
+    print("flight: request failed:", text, file=stderr, flush=True)
+    return GrpcStatus.err(GrpcStatus.INTERNAL, String(INTERNAL_MESSAGE))
+
+
 def _encapsulated_schema(fields: List[FieldSpec]) raises -> List[UInt8]:
     """The schema in the form `FlightInfo.schema` / `SchemaResult` expects.
 
@@ -77,6 +161,17 @@ def _encapsulated_schema(fields: List[FieldSpec]) raises -> List[UInt8]:
     var msg = build_schema_message(fields)
     var empty = List[UInt8]()
     return frame_message(Span(msg), Span(empty))
+
+
+def _decode_descriptor(
+    request_bytes: Span[UInt8, _]
+) raises -> FlightDescriptor:
+    try:
+        return FlightDescriptor.decode(request_bytes)
+    except:
+        raise invalid_argument(
+            "flight: the request is not a FlightDescriptor message"
+        )
 
 
 def _to_list(s: Span[UInt8, _]) -> List[UInt8]:
@@ -128,12 +223,17 @@ struct FlightServer[D: Copyable & Deinitable & FlightSource](
     ) raises -> GrpcServerStreamReply:
         var path = ctx.path
 
-        if path == String(PATH_GET_FLIGHT_INFO):
-            return self._get_flight_info(request_bytes)
-        elif path == String(PATH_GET_SCHEMA):
-            return self._get_schema()
-        elif path == String(PATH_DO_GET):
-            return self._do_get(request_bytes)
+        # Every raise below is answered here, with the status it names or
+        # INTERNAL, so none reaches flare as its generic "handler raised".
+        try:
+            if path == String(PATH_GET_FLIGHT_INFO):
+                return self._get_flight_info(request_bytes)
+            elif path == String(PATH_GET_SCHEMA):
+                return self._get_schema(request_bytes)
+            elif path == String(PATH_DO_GET):
+                return self._do_get(request_bytes)
+        except e:
+            return GrpcServerStreamReply.err(status_for(e))
 
         # 12 is gRPC UNIMPLEMENTED. A client that probes an optional method
         # expects this rather than a connection error.
@@ -173,11 +273,11 @@ struct FlightServer[D: Copyable & Deinitable & FlightSource](
         right answer for a single process, and the one that avoids inventing a
         hostname the client may not be able to reach.
         """
-        var desc = FlightDescriptor()
-        try:
-            desc = FlightDescriptor.decode(request_bytes)
-        except:
-            pass  # a malformed descriptor still gets the whole dataset
+        # The descriptor is not used to choose anything -- a server holds one
+        # dataset -- but bytes that are not a FlightDescriptor at all are a
+        # broken client, and answering them with the dataset would hide that.
+        # Unknown fields are skipped by the decoder, so only garbage fails.
+        var desc = _decode_descriptor(request_bytes)
 
         var info = FlightInfo()
         info.schema = _encapsulated_schema(self.source.fields())
@@ -222,7 +322,10 @@ struct FlightServer[D: Copyable & Deinitable & FlightSource](
         # where they land; deflating them on the way out gives that up twice.
         return GrpcServerStreamReply.ok(msgs^, compress=False)
 
-    def _get_schema(mut self) raises -> GrpcServerStreamReply:
+    def _get_schema(
+        mut self, request_bytes: Span[UInt8, _]
+    ) raises -> GrpcServerStreamReply:
+        _ = _decode_descriptor(request_bytes)
         var res = SchemaResult()
         res.schema = _encapsulated_schema(self.source.fields())
         var msgs = List[List[UInt8]]()
@@ -251,12 +354,20 @@ struct FlightServer[D: Copyable & Deinitable & FlightSource](
         # with the schema even when the ticket turns out to be empty: the
         # client builds its reader from that message, so a stream that skipped
         # it because there were no rows would fail rather than return nothing.
-        var req = Ticket()
+        var req: Ticket
         try:
             req = Ticket.decode(request_bytes)
         except:
-            pass
-        var which = String(unsafe_from_utf8=Span(req.ticket))
+            raise invalid_argument(
+                "flight: the request is not a Ticket message"
+            )
+        # A ticket is opaque bytes on the wire, but `FlightSource` reads it as
+        # text, and that text is only safe to build from valid UTF-8.
+        var which: String
+        try:
+            which = String(from_utf8=Span(req.ticket))
+        except:
+            raise invalid_argument("flight: the ticket is not UTF-8 text")
 
         var fields = self.source.fields()
         var msgs = List[List[UInt8]]()
@@ -326,6 +437,12 @@ trait FlightSource(Movable):
     The union of every ticket's batches must be the whole result, and no two
     tickets may return the same row, or a client that fetches them all gets
     the wrong answer.
+
+    **A raise is a server fault unless it says otherwise.** A source that
+    finds the *request* wrong raises `invalid_argument` (a ticket it cannot
+    parse) or `not_found` (a well-formed one naming something that does not
+    exist), and the client gets that status and message. Anything else it
+    raises is answered INTERNAL; see the module doc.
     """
 
     def fields(self) raises -> List[FieldSpec]:
@@ -339,5 +456,10 @@ trait FlightSource(Movable):
         ...
 
     def batches(self, ticket: String) raises -> List[List[Column]]:
-        """The batches behind one ticket from `tickets`."""
+        """The batches behind one ticket from `tickets`.
+
+        `ticket` is whatever the client sent, which need not be one this
+        source handed out: refuse it with `invalid_argument` or `not_found`
+        rather than with a bare raise.
+        """
         ...

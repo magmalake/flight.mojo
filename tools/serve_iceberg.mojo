@@ -76,7 +76,12 @@ from flight.ipc import (
     DT_UTF8,
     FieldSpec,
 )
-from flight.server import FlightServer, FlightSource
+from flight.server import (
+    FlightServer,
+    FlightSource,
+    invalid_argument,
+    not_found,
+)
 from flight.writer import Column
 
 
@@ -142,31 +147,57 @@ def _encode_ticket(
     )
 
 
+comptime _TICKET_SHAPE: StaticString = "'<snapshot>|<start>|<length>|<path>'"
+
+
+def _ticket_int(field: StringSpan, name: StaticString) raises -> Int64:
+    """One numeric field of a ticket, or INVALID_ARGUMENT naming it."""
+    try:
+        return Int64(atol(field))
+    except:
+        raise invalid_argument(
+            String("flight: malformed ticket, the ")
+            + name
+            + String(" is not an integer; expected ")
+            + _TICKET_SHAPE
+        )
+
+
 def _decode_ticket(ticket: String) raises -> Tuple[Int64, Int64, Int64, String]:
     """Split on the first three bars; the rest is the path.
 
     Only the first three, because a file path may itself contain one.
+
+    Whatever fails here is the client's: the bytes came off the wire, so a
+    ticket this cannot read is answered INVALID_ARGUMENT, never INTERNAL.
     """
     var bytes = ticket.as_bytes()
     var cuts = List[Int]()
-    for i in range(len(bytes)):
+    var i = 0
+    while i < len(bytes) and len(cuts) < 3:
         if bytes[i] == UInt8(124):  # "|"
             cuts.append(i)
-            if len(cuts) == 3:
-                break
+        i += 1
     if len(cuts) < 3:
-        raise Error(
-            "flight: malformed ticket, expected"
-            " '<snapshot>|<start>|<length>|<path>'"
+        raise invalid_argument(
+            String("flight: malformed ticket, expected ") + _TICKET_SHAPE
         )
-    var snap = Int64(atol(String(unsafe_from_utf8=bytes[: cuts[0]])))
-    var start = Int64(
-        atol(String(unsafe_from_utf8=bytes[cuts[0] + 1 : cuts[1]]))
+    var snap = _ticket_int(
+        StringSpan(unsafe_from_utf8=bytes[: cuts[0]]), "snapshot"
     )
-    var length = Int64(
-        atol(String(unsafe_from_utf8=bytes[cuts[1] + 1 : cuts[2]]))
+    var start = _ticket_int(
+        StringSpan(unsafe_from_utf8=bytes[cuts[0] + 1 : cuts[1]]), "start"
     )
+    var length = _ticket_int(
+        StringSpan(unsafe_from_utf8=bytes[cuts[1] + 1 : cuts[2]]), "length"
+    )
+    if start < 0 or length < 0:
+        raise invalid_argument(
+            "flight: malformed ticket, a negative start or length"
+        )
     var path = String(unsafe_from_utf8=bytes[cuts[2] + 1 :])
+    if path.byte_length() == 0:
+        raise invalid_argument("flight: malformed ticket, the path is empty")
     return (snap, start, length, path^)
 
 
@@ -393,6 +424,19 @@ struct IcebergSource(Copyable, FlightSource, Movable):
         any delete files attached to the task — so a worker returns exactly
         the rows a whole-table scan would have returned for that file. That is
         what makes the union of tickets equal the whole.
+
+        What a ticket from a client can get wrong, and the answer to each:
+
+        - it cannot be parsed: INVALID_ARGUMENT (`_decode_ticket`);
+        - it names a snapshot the table does not have — never had, or has
+          since expired: NOT_FOUND. There is nothing to read it against, and
+          an empty answer would let a client that fans out assemble a table
+          with that part silently missing. Planning again is the remedy;
+        - it names a snapshot the table has, and a split that snapshot's plan
+          does not contain: an **empty stream**. That is Iceberg's rule for a
+          stale ticket (`to_batches_for_splits`): the snapshot's rows in that
+          split are the empty set, and a worker holding one should come back
+          empty rather than fail the query.
         """
         var decoded = _decode_ticket(ticket)
         var snapshot = decoded[0]
@@ -406,9 +450,17 @@ struct IcebergSource(Copyable, FlightSource, Movable):
         # about; `to_batches_for_paths` returns nothing for a file that
         # snapshot never had, rather than failing the query.
         var out = List[List[Column]]()
+        # Opening the table is the server's business; a failure there is a
+        # fault, not the client's, and stays INTERNAL.
+        var scan = _open(self.table_dir, self.columns)
+        if scan.metadata.snapshot_index(snapshot) < 0:
+            raise not_found(
+                String("flight: snapshot ")
+                + String(snapshot)
+                + String(" is not in the table; plan again with GetFlightInfo")
+            )
         var batches = (
-            _open(self.table_dir, self.columns)
-            .use_snapshot(snapshot)
+            scan.use_snapshot(snapshot)
             .with_split_size(self.split_size)
             .to_batches_for_splits(paths, starts, ScanOptions())
         )

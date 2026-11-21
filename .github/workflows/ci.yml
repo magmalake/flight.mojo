@@ -110,6 +110,10 @@ jobs:
         working-directory: flight.mojo
         run: pixi run -e verify verify-flight
 
+      - name: the status for every bad request
+        working-directory: flight.mojo
+        run: pixi run test
+
   # The whole read stack: an Iceberg table served over Flight, one endpoint
   # per data file. The sibling list is long because iceberg needs avro and
   # parquet, parquet needs arrow, thrift and four codecs, and everything needs
