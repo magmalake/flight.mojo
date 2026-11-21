@@ -71,7 +71,13 @@ verify-iceberg = { cmd = "bash tools/verify_iceberg.sh", depends-on = ["serve-ic
 # gate that would fail if `Location` were dropped, wrong, or all on one worker.
 verify-cluster = { cmd = "bash tools/verify_cluster.sh", depends-on = ["serve-iceberg"] }
 
-fmt = { cmd = "mojo format src tools" }
+# What the server answers each bad request with, called directly rather than
+# over a socket: that reaches the cases a stock client cannot send (bytes that
+# are not a protobuf message) and the one it cannot provoke (a source failing
+# on its own). The gates above check the rest through pyarrow.
+test = { cmd = "mojo run -I src -I ../flare_mlake -I ../threads.mojo/src -I ../threads.mojo/compat tests/test_status.mojo" }
+
+fmt = { cmd = "mojo format src tools tests" }
 
 [feature.verify.dependencies]
 # pyarrow's conda build splits Flight into libarrow-flight; without it

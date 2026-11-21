@@ -130,5 +130,48 @@ if info.schema != table.schema:
     print(f"MISMATCH schema:\n  info   {info.schema}\n  stream {table.schema}")
     ok = False
 
+# Bad tickets. Each is the client's mistake, so each has a deliberate status
+# and none may come back INTERNAL (pyarrow's FlightInternalError), which is
+# for the server's own faults. pyarrow raises ArrowKeyError for NOT_FOUND and
+# ArrowInvalid for INVALID_ARGUMENT.
+real = info.endpoints[0].ticket.ticket.decode()
+snapshot, start, length, path = real.split("|", 3)
+EMPTY = "an empty stream"
+bad_tickets = [
+    # A snapshot the table does not have: nothing to read it against.
+    (b"0|0|0|/nonexistent.parquet", pa.lib.ArrowKeyError, "NOT_FOUND"),
+    # A snapshot the table has, and a split its plan does not: the stale
+    # ticket Iceberg answers with no rows, rather than failing the query.
+    (f"{snapshot}|{start}|{length}|/nonexistent.parquet".encode(), None, EMPTY),
+    (f"{snapshot}|999999999|{length}|{path}".encode(), None, EMPTY),
+    # Malformed.
+    (b"not-a-ticket", pa.lib.ArrowInvalid, "INVALID_ARGUMENT"),
+    (b"", pa.lib.ArrowInvalid, "INVALID_ARGUMENT"),
+    (b"x|0|0|/a.parquet", pa.lib.ArrowInvalid, "INVALID_ARGUMENT"),
+    (f"{snapshot}|zero|0|{path}".encode(), pa.lib.ArrowInvalid, "INVALID_ARGUMENT"),
+    (f"{snapshot}|-1|0|{path}".encode(), pa.lib.ArrowInvalid, "INVALID_ARGUMENT"),
+    (f"{snapshot}|0|0|".encode(), pa.lib.ArrowInvalid, "INVALID_ARGUMENT"),
+    (b"\xff|0|0|/a.parquet", pa.lib.ArrowInvalid, "INVALID_ARGUMENT"),
+]
+for ticket, want, status in bad_tickets:
+    shown = ticket[:40]
+    try:
+        got = client.do_get(fl.Ticket(ticket)).read_all()
+        if want is not None:
+            print(f"MISMATCH ticket {shown!r}: {got.num_rows} rows, expected {status}")
+            ok = False
+        elif got.num_rows != 0 or got.schema != info.schema:
+            print(f"MISMATCH ticket {shown!r}: {got.num_rows} rows, expected {EMPTY} "
+                  "with the table's schema")
+            ok = False
+        else:
+            print(f"ticket {shown!r}: {EMPTY}")
+    except Exception as e:  # noqa: BLE001
+        if want is not None and isinstance(e, want):
+            print(f"ticket {shown!r}: {status} ({str(e).split('. gRPC')[0]})")
+        else:
+            print(f"MISMATCH ticket {shown!r}: {type(e).__name__}, expected {status}: {e}")
+            ok = False
+
 print("ICEBERG FLIGHT OK" if ok else "ICEBERG FLIGHT FAILED")
 sys.exit(0 if ok else 1)

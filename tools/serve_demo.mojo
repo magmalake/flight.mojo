@@ -5,7 +5,7 @@ from flare.http import HttpServer
 from flare.net import SocketAddr
 
 from flight.ipc import DT_BOOL, DT_FLOAT64, DT_INT64, DT_UTF8, FieldSpec
-from flight.server import FlightServer, FlightSource
+from flight.server import FlightServer, FlightSource, not_found
 from flight.writer import Column
 
 
@@ -33,6 +33,11 @@ struct DemoSource(Copyable, FlightSource, Movable):
         return t^
 
     def batches(self, ticket: String) raises -> List[List[Column]]:
+        # The one ticket `tickets` hands out; any other names nothing.
+        if ticket != String("all"):
+            raise not_found(
+                String("flight: no such ticket; this server has one, 'all'")
+            )
         var ids = List[Int64]()
         var amounts = List[Float64]()
         var flags = List[Bool]()
