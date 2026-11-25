@@ -1,5 +1,7 @@
 # flight.mojo
 
+[![Used by](https://mojourney.dev/badge/magmalake/flight.mojo/used-by.svg)](https://mojourney.dev/repos/magmalake/flight.mojo#used-by) [![Mojo version](https://mojourney.dev/badge/magmalake/flight.mojo/mojo.svg)](https://mojourney.dev/repos/magmalake/flight.mojo)
+
 Apache Arrow Flight for Mojo: an Arrow **IPC writer** and a **Flight server**
 built on [flare](https://github.com/ehsanmok/flare)'s gRPC.
 
